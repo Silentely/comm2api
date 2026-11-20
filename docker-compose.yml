@@ -32,6 +32,15 @@ services:
       - CC_FINGERPRINT_SALT
       - CC_DEVICE_PROJECT_DIR
       - ADMIN_COOKIE_SECURE
+      # 云端无持久卷部署：配置 Redis 后，网页端添加的上游 Key、2API Key、管理密码与配置项会自动持久化到 Redis
+      - REDIS_URL
+      - REDIS_HOST
+      - REDIS_PORT
+      - REDIS_USERNAME
+      - REDIS_PASSWORD
+      - REDIS_DB
+      - REDIS_TLS
+      - REDIS_PREFIX
     volumes:
       # 挂载本地配置，提供 proxyKey / apiKey
       # ⚠️ 首次部署先执行：cp config.json.example config.json

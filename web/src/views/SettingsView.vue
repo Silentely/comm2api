@@ -487,6 +487,25 @@ onMounted(() => {
           <dd class="mono">{{ (config && config.host) || '-' }}:{{ (config && config.port) || '-' }}</dd>
           <dt>引擎版本</dt>
           <dd class="mono">{{ version }}</dd>
+          <dt>持久化存储</dt>
+          <dd>
+            <template v-if="config && config.storage && config.storage.mode === 'redis'">
+              <span class="badge" :class="config.storage.redis?.connected ? 'ok' : 'warn'">
+                {{ config.storage.redis?.connected ? 'Redis 云端持久化' : 'Redis 连接异常' }}
+              </span>
+              <span class="mono" style="margin-left: 8px">{{ config.storage.redis?.url || '-' }}</span>
+              <span v-if="config.storage.redis?.hashKey" class="hint" style="margin-left: 6px">
+                Hash: {{ config.storage.redis.hashKey }} · 已同步 {{ fmtNum(config.storage.redis.keysCount || 0) }} 项
+              </span>
+              <div v-if="config.storage.redis?.lastError" class="hint" style="margin-top: 4px; color: var(--err)">
+                最近错误：{{ config.storage.redis.lastError }}
+              </div>
+            </template>
+            <template v-else>
+              <span class="badge muted">本地文件</span>
+              <span class="hint" style="margin-left: 6px">无持久卷的云端部署可设置 REDIS_URL 启用 Redis 持久化</span>
+            </template>
+          </dd>
           <dt>数据目录</dt>
           <dd class="mono">{{ (config && config.dataDir) || '-' }}</dd>
           <dt>配置文件</dt>

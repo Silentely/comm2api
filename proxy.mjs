@@ -18,7 +18,7 @@ import { appendFileSync } from 'fs';
 //      `CFG.xxx` 读取无需改动，也不会出现「新旧两份配置」并存的窗口；
 //   2) Key 池在每次选 Key 时现取，后台改完立即生效，不需要重启也不需要 fs.watch。
 import { CFG, DOTENV, startConfigWatcher } from './lib/config.mjs';
-import { DATA_DIR } from './lib/store.mjs';
+import { DATA_DIR, flushStore, closeStore, getStorageStatus } from './lib/store.mjs';
 import { createLogBus, levelEnabled } from './lib/logbus.mjs';
 import { createKeyPool } from './lib/keys.mjs';
 import { createProxyPool, redactProxyUrl as redactPoolProxyUrl, parseProxyEntry } from './lib/proxies.mjs';
@@ -6351,6 +6351,15 @@ server.listen(CFG.port, CFG.host, () => {
     proxyPool: `${proxyPool.size} 条（健康 ${proxyPool.list().filter(t => t.healthy).length}）`
       + (proxyPool.file ? ` · 代理文件 ${proxyPool.file}` : ''),
     dataDir: DATA_DIR,
+    storage: (() => {
+      const st = getStorageStatus();
+      if (st.mode === 'redis') {
+        const r = st.redis;
+        const state = r.connected ? '已连接' : ('降级/待重试' + (r.lastError ? ': ' + r.lastError : ''));
+        return `redis (${r.url} · hash ${r.hashKey} · ${state} · ${r.keysCount} 项)`;
+      }
+      return `file (${DATA_DIR})`;
+    })(),
     // 明确说出 .env 有没有被读到、读了哪些键（值不打印，里面有密码）。
     // 容器里必然是「未找到」—— Docker 下 .env 由 compose 在宿主侧读取后作为真实环境变量注入，
     // 文件本身不在容器内，这里点明以免被误解成配置没生效。
@@ -6436,11 +6445,19 @@ server.listen(CFG.port, CFG.host, () => {
 
 // ── 退出前把防抖中的用量计数落盘 ──────────────────────
 // 用量是每 5 秒才落一次盘，进程被 SIGTERM 时最后一次改动还在内存里。
-function flushAndExit(signal) {
-  log('info', `收到 ${signal}，正在落盘 Key 池用量后退出`);
+let shuttingDown = false;
+async function flushAndExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log('info', `收到 ${signal}，正在落盘数据后退出`);
   try { keyPool.flushSync(); } catch {}
   try { quotaService.flushSync(); } catch {}
   try { quotaService.stop(); } catch {}
+  try {
+    const res = await flushStore(5000);
+    if (!res.ok) log('warn', '退出前 Redis 落盘未完全同步', { pending: res.pending, error: res.error });
+  } catch {}
+  try { await closeStore(); } catch {}
   process.exit(0);
 }
 process.on('SIGTERM', () => flushAndExit('SIGTERM'));

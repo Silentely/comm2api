@@ -49,6 +49,7 @@ const modelsInfo = computed(() => d.value.models || {})
 const requests = computed(() => d.value.requests || {})
 const tokens = computed(() => d.value.tokens || {})
 const admin = computed(() => d.value.admin || {})
+const storageInfo = computed(() => admin.value.storage || { mode: 'file', redis: {} })
 
 // 官方额度概览（仪表盘只看“现在能用几个账号、谁快满了”）
 const quota = ref(null)
@@ -347,6 +348,19 @@ onUnmounted(() => {
           <dd>{{ strategyText }}</dd>
           <dt>上游地址</dt>
           <dd class="mono">{{ admin.address || '-' }}</dd>
+          <dt>持久化存储</dt>
+          <dd>
+            <template v-if="storageInfo.mode === 'redis'">
+              <span class="badge" :class="storageInfo.redis?.connected ? 'ok' : 'warn'">
+                {{ storageInfo.redis?.connected ? 'Redis 已连接' : 'Redis 待重连' }}
+              </span>
+              <span class="mono" style="margin-left: 8px">{{ storageInfo.redis?.url || '-' }}</span>
+              <span v-if="storageInfo.redis?.hashKey" class="hint" style="margin-left: 6px">
+                ({{ storageInfo.redis.hashKey }} · {{ fmtNum(storageInfo.redis.keysCount || 0) }} 项)
+              </span>
+            </template>
+            <span v-else class="badge muted">本地文件</span>
+          </dd>
           <dt>数据目录</dt>
           <dd class="mono">{{ admin.dataDir || '-' }}</dd>
           <dt>模型上次同步</dt>
