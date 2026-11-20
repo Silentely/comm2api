@@ -9,6 +9,7 @@
 - [推荐：Docker Compose 部署](#推荐docker-compose-部署)
 - [Docker 裸机运行 (docker run)](#docker-裸机运行-docker-run)
 - [配置持久化与目录挂载](#配置持久化与目录挂载)
+- [无持久卷的云端部署：Redis 持久化](#无持久卷的云端部署redis-持久化)
 - [从源码构建本地镜像](#从源码构建本地镜像)
 - [宿主机 Node.js 运行](#宿主机-nodejs-运行)
 - [生产环境 Nginx 反向代理配置](#生产环境-nginx-反向代理配置)
@@ -88,6 +89,23 @@ docker run -d \
 > ⚠️ **避坑提示**：
 > 1. **宿主机文件必须事先存在**：若宿主机上没有 `config.json` 就直接启动挂载，Docker 会自动在宿主机创建名为 `config.json` 的**空目录**，导致容器读取报错 `EISDIR` 并回退到内置空配置。
 > 2. **容器内部端口恒定为 3050**：容器内环境固定 `PORT=3050`（健康检查依赖此端口），更换对外端口请通过宿主端口映射（如 `-p 8080:3050` 或 `PROXY_PORT=8080`）。
+
+---
+
+## 无持久卷的云端部署：Redis 持久化
+
+Railway、Render、Zeabur、Fly.io、Serverless 容器等平台通常不提供可长期保留的本地卷，容器重建后 `/app/data` 会被清空。此类部署可配置 Redis，把运行时数据保存到远端：
+
+```bash
+# 以 Railway/Render 等平台的环境变量面板为例
+REDIS_URL=rediss://default:YOUR_REDIS_PASSWORD@redis.example.com:6379/0
+# 多个实例共用一个 Redis 库时，用前缀隔离数据（默认 comm2api:）
+REDIS_PREFIX=comm2api:
+```
+
+配置后无需改动挂载结构：服务启动时从 Redis Hash（`<prefix>state`）恢复上游 Key、2API Key、后台密码、运行时配置、代理池与额度快照；首次启动且 Redis 为空时会自动迁入本地已有的 `data/*.json`。后台仪表盘与设置页会显示 Redis 连接状态和已同步条目数，若显示「待重连」会在后台自动重试。
+
+> 变量含义、`redis://`（TLS）与分项 `REDIS_HOST` 等方式见 [配置参考：Redis 云端持久化](configuration.md#可选redis-云端持久化)。
 
 ---
 

@@ -10,6 +10,7 @@
 - [config.json 完整字段参考](#configjson-完整字段参考)
 - [用 .env 配置（推荐）](#用-env-配置推荐)
 - [环境变量完整列表](#环境变量完整列表)
+- [可选：Redis 云端持久化](#可选redis-云端持久化)
 - [出站代理池深度指南](#出站代理池深度指南)
 - [容量与资源限制配置](#容量与资源限制配置)
 
@@ -28,7 +29,7 @@
 ```
 
 - **Docker 与直接运行通用**：程序自身已集成轻量级 `.env` 解析器，Docker Compose 也会自动注入同目录 `.env`。
-- **配置持久化原则**：`config.json` 在 Docker 中应只读挂载 (`:ro`)；后台在网页修改的选项只保存到 `data/settings.json`，不会改写 `config.json`。
+- **配置持久化原则**：`config.json` 在 Docker 中应只读挂载 (`:ro`)；后台在网页修改的选项只保存到 `data/settings.json`（配置 Redis 后保存到 Redis），不会改写 `config.json`。
 
 ---
 
@@ -151,6 +152,32 @@ CC_DATA_DIR=./data
 | `CC_KEEPALIVE_TIMEOUT_MS` | `65000` (65s) | HTTP Keep-Alive 空闲保持时长（反代必须小于此值） |
 | `CC_WEB_SEARCH` | 关 | 设为 `1` 开启代执行 Anthropic Web Search 工具 |
 | `CC_WEB_SEARCH_TIMEOUT_MS` | `8000` (8s) | 搜索子请求单次超时时间 |
+
+---
+
+## 可选：Redis 云端持久化
+
+在不提供持久卷的云平台上运行时（Railway、Render、Zeabur、Fly.io、Serverless 容器等），可配置 Redis 作为运行时存储：原本写入 `data/` 的可变数据会以 JSON 值保存在同一个 Redis Hash 中，容器重启后启动即自动水合，不依赖本地磁盘。
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `REDIS_URL`（或 `CC_REDIS_URL`） | 空 | Redis 连接串，支持 `redis://` 与 `rediss://`（TLS） |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD` / `REDIS_DB` / `REDIS_TLS` | `6379` / `0` / 关 | 分项连接配置，仅在 `REDIS_URL` 未设置时生效；均支持 `CC_REDIS_*` 别名 |
+| `REDIS_PREFIX`（或 `CC_REDIS_PREFIX`） | `comm2api:` | Hash 键前缀（实际键名 `<prefix>state`），多实例共用一个 Redis 库时用于隔离 |
+
+```bash
+# 标准 Redis 或云端 TLS Redis（如 Upstash、Redis Cloud）
+REDIS_URL=rediss://default:YOUR_REDIS_PASSWORD@redis.example.com:6379/0
+REDIS_PREFIX=comm2api:
+```
+
+行为说明：
+
+- **水合范围**：上游 Key（`keys.json`）、2API Key（`api-keys.json`）、运行时配置（`settings.json`）、管理密码（`.admin-auth.json`）、出站代理池（`proxies.json`）、禁用模型（`models.json`）、模型测试记录与额度快照。
+- **写入策略**：每次写入先更新内存镜像并异步串行写回 Redis，同时尽力写一份本地文件；云端只读/临时文件系统下本地写入失败不影响服务。
+- **首次迁移**：Redis Hash 为空且本地 `data/` 已有合法 `.json` 文件时，首次启动会自动迁入 Redis；之后以 Redis 为准。
+- **故障降级**：Redis 短暂不可用时服务继续运行，待写入数据进入重试队列（指数退避，最长 30 秒）；进程收到 SIGTERM/SIGINT 时会先尝试刷出待写入数据再退出。
+- **状态查看**：启动日志与后台「仪表盘 / 设置」页会显示当前存储模式、脱敏连接串、Hash 键名与已同步条目数。
 
 ---
 

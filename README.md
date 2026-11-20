@@ -46,6 +46,9 @@ Rigorously reverse-engineered and aligned 1:1 with the official CLI source code 
   - Transparent pre-first-byte retry on transient connection resets (RST/FIN) with exponential backoff;
   - TCP stream backpressure prevents memory exhaustion when downstream clients read slowly;
   - Automatically learns and clamps model-specific physical `max_tokens` limits.
+- **☁️ Optional Redis Persistence**:
+  - Runs on platforms without persistent volumes (Railway, Render, Fly.io, serverless containers) via `REDIS_URL` or discrete `REDIS_*` variables;
+  - Hydrates keys, 2API tokens, settings, password hash, proxies, model state and quota snapshots at boot, seeds an empty Redis from existing `data/*.json`, and flushes pending writes on shutdown.
 - **🖥️ Retro-Brutalist Web Admin Dashboard**:
   - Manage upstream accounts and issue 2API keys dynamically;
   - Real-time quota metrics, local token usage analytics, and proxy health monitoring;

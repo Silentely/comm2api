@@ -103,9 +103,23 @@
                "cacheWriteToday": 1, "cacheWriteTotal": 1,
                "cacheMissToday": 1, "cacheMissTotal": 1,
                "cacheHitRateToday": 0.85, "cacheHitRateTotal": 0.85 },
-  "admin":   { "address": "http://0.0.0.0:3050", "dataDir": "/app/data" }
+  "admin":   { "address": "http://0.0.0.0:3050", "dataDir": "/app/data",
+               "storage": {
+                 "mode": "redis",
+                 "dataDir": "/app/data",
+                 "redis": {
+                   "enabled": true, "connected": true, "hydrated": true,
+                   "url": "rediss://default:***@redis.example.com:6379/0",
+                   "prefix": "comm2api:", "hashKey": "comm2api:state",
+                   "keysCount": 8, "pendingWrites": 0,
+                   "lastSyncAt": 1760000000000, "lastError": null
+                 }
+               } }
 } }
 ```
+
+`admin.storage.mode` 为 `file`（默认，写 `data/`）或 `redis`（配置了 `REDIS_URL` / `REDIS_HOST`）。
+`redis.url` 已脱敏；`redis.connected` 为实时连接探测结果，`keysCount` 是 Redis Hash 中的条目数。
 
 ## 2API Key（下游客户端凭证）
 
@@ -364,6 +378,7 @@ Key 列表项（下称 `KeyItem`）：
   "strategy": "round_robin", "defaultModel": "deepseek/deepseek-v4-flash",
   "dataDir": "/app/data", "configPath": "/app/config.json",
   "settingsPath": "/app/data/settings.json",
+  "storage": { "mode": "file", "dataDir": "/app/data", "redis": { "enabled": false } },
   "version": "1.3.0",
   "envLocked": ["logLevel"],
   "settingSources": { "strategy": "settings", "logLevel": "env", "port": "config" },
@@ -380,6 +395,8 @@ Key 列表项（下称 `KeyItem`）：
 - `envLocked`：被环境变量锁定的字段。这些字段**后台改不动**（不落盘也不改内存），
   提交时会在 `message` 中明确列出。
 - `settingsPath`：后台改动的落盘位置。
+- `storage`：当前持久化后端（字段同 `GET /admin/api/stats` 的 `admin.storage`）。`mode=redis` 时
+  后台改动先写 Redis，`settingsPath` 仅作为本地镜像路径。
 
 ### `POST /admin/api/config/update` （保护）
 请求（全部字段可选，只更新传入的）：
@@ -400,6 +417,7 @@ Key 列表项（下称 `KeyItem`）：
 
 **落盘位置**：改动写入 `data/settings.json`，**不修改 `config.json`**。
 `config.json` 是部署期输入（Docker 里通常以只读单文件挂载），保持原样。
+配置 Redis 后，改动写入 Redis Hash（同时尽力写本地镜像），成功提示为 `已保存到 Redis`。
 
 **配置分层优先级**：`环境变量` > `data/settings.json`（后台写入）> `config.json` > 内置默认值。
 只写被改动的字段（稀疏覆盖），因此后台没碰过的字段仍然听 `config.json` 的。
