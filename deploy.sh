@@ -14,8 +14,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 HOST_PORT=37080          # Web 端口（可用 PROXY_PORT 环境变量覆盖）
-GH_ACCOUNT=silentely   # 目标 GitHub 账号
-IMAGE=ghcr.io/silentely/comm2api:latest
+DETECTED_GH=$(gh api user -q .login 2>/dev/null || true)
+GH_ACCOUNT="${GH_ACCOUNT:-${DETECTED_GH:-silentely}}"   # 目标 GitHub 账号
+IMAGE="ghcr.io/${GH_ACCOUNT}/comm2api:latest"
 COMPOSE_FILE=docker-compose.yml
 DO_GH=1
 DO_REBUILD=1   # 默认本地构建：源码已含修复，GHCR 预构建镜像追不上本地提交

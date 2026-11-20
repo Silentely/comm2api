@@ -85,6 +85,18 @@ test('GET /health 与 / 返回存活状态', async () => {
   } finally { await s.close(); }
 });
 
+test('GET /favicon.ico 返回 SVG 图标且具备客户端长缓存', async () => {
+  const s = await setup();
+  try {
+    const r = await s.proxy.get('/favicon.ico');
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'image/svg+xml');
+    assert.ok(r.headers.get('cache-control')?.includes('public'));
+    const body = await r.text();
+    assert.ok(body.includes('<svg'), '响应体应为 SVG');
+  } finally { await s.close(); }
+});
+
 test('未知路由返回 404', async () => {
   const s = await setup();
   try {

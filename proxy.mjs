@@ -2657,69 +2657,84 @@ async function proxyFetch(urlStr, options = {}, proxyUrl = null) {
   const port = Number.parseInt(u.port || (isTls ? '443' : '80'), 10);
   const target = `${u.hostname}:${port}`;
   const { signal, body } = options;
-  const onAbort = (fn) => { if (signal) signal.addEventListener('abort', fn, { once: true }); };
+  const abortListeners = [];
+  const onAbort = (fn) => {
+    if (signal) {
+      signal.addEventListener('abort', fn, { once: true });
+      abortListeners.push(fn);
+    }
+  };
+  const cleanupAborts = () => {
+    if (signal) {
+      for (const fn of abortListeners) signal.removeEventListener('abort', fn);
+    }
+  };
 
-  // 1. CONNECT 隧道 —— 代理只做裸字节转发，TLS 由本端端到端完成
-  const rawSocket = await new Promise((resolve, reject) => {
-    const connectReq = http.request({
-      host: proxy.host,
-      port: proxy.port,
-      method: 'CONNECT',
-      path: target,
-      headers: { Host: target, ...(proxy.auth ? { 'Proxy-Authorization': proxy.auth } : {}) },
-      timeout: PROXY_CONNECT_TIMEOUT_MS,
+  try {
+    // 1. CONNECT 隧道 —— 代理只做裸字节转发，TLS 由本端端到端完成
+    const rawSocket = await new Promise((resolve, reject) => {
+      const connectReq = http.request({
+        host: proxy.host,
+        port: proxy.port,
+        method: 'CONNECT',
+        path: target,
+        headers: { Host: target, ...(proxy.auth ? { 'Proxy-Authorization': proxy.auth } : {}) },
+        timeout: PROXY_CONNECT_TIMEOUT_MS,
+      });
+      connectReq.on('connect', (res, socket) => {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          reject(new Error(`upstream proxy CONNECT ${target} failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(socket);
+      });
+      connectReq.on('timeout', () => connectReq.destroy(new Error('upstream proxy CONNECT timeout')));
+      connectReq.on('error', reject);
+      onAbort(() => { try { connectReq.destroy(); } catch {} });
+      connectReq.end();
     });
-    connectReq.on('connect', (res, socket) => {
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        reject(new Error(`upstream proxy CONNECT ${target} failed: HTTP ${res.statusCode}`));
-        return;
-      }
-      resolve(socket);
-    });
-    connectReq.on('timeout', () => connectReq.destroy(new Error('upstream proxy CONNECT timeout')));
-    connectReq.on('error', reject);
-    onAbort(() => { try { connectReq.destroy(); } catch {} });
-    connectReq.end();
-  });
 
-  // 2. 隧道上做 TLS（证书按目标主机名校验，不做任何降级）
-  let socket = rawSocket;
-  if (isTls) {
-    socket = tls.connect({ socket: rawSocket, servername: u.hostname });
-    await new Promise((resolve, reject) => {
-      socket.once('secureConnect', resolve);
-      socket.once('error', reject);
-      onAbort(() => { try { socket.destroy(); } catch {} });
+    // 2. 隧道上做 TLS（证书按目标主机名校验，不做任何降级）
+    let socket = rawSocket;
+    if (isTls) {
+      socket = tls.connect({ socket: rawSocket, servername: u.hostname });
+      await new Promise((resolve, reject) => {
+        socket.once('secureConnect', resolve);
+        socket.once('error', reject);
+        onAbort(() => { try { socket.destroy(); } catch {} });
+      });
+    }
+
+    // 3. 复用隧道 socket 发请求
+    return await new Promise((resolve, reject) => {
+      const mod = isTls ? https : http;
+      const req = mod.request({
+        host: u.hostname,
+        port,
+        path: u.pathname + u.search,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+        createConnection: () => socket,
+      }, (res) => {
+        // 204/205/304 按规范不允许带 body，Response 构造器会直接抛 —— 这两个状态必须传 null，
+        // 同时把连接排空，避免隧道 socket 悬着。
+        const nullBodyStatus = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
+        if (nullBodyStatus) { try { res.resume(); } catch {} }
+        resolve(new Response(nullBodyStatus ? null : Readable.toWeb(res), {
+          status: res.statusCode,
+          statusText: res.statusMessage,
+          headers: headersToInit(res.headers),
+        }));
+      });
+      req.on('error', reject);
+      onAbort(() => { try { req.destroy(); } catch {} });
+      if (body !== undefined && body !== null) req.write(body);
+      req.end();
     });
+  } finally {
+    cleanupAborts();
   }
-
-  // 3. 复用隧道 socket 发请求
-  return await new Promise((resolve, reject) => {
-    const mod = isTls ? https : http;
-    const req = mod.request({
-      host: u.hostname,
-      port,
-      path: u.pathname + u.search,
-      method: options.method || 'GET',
-      headers: options.headers || {},
-      createConnection: () => socket,
-    }, (res) => {
-      // 204/205/304 按规范不允许带 body，Response 构造器会直接抛 —— 这两个状态必须传 null，
-      // 同时把连接排空，避免隧道 socket 悬着。
-      const nullBodyStatus = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
-      if (nullBodyStatus) { try { res.resume(); } catch {} }
-      resolve(new Response(nullBodyStatus ? null : Readable.toWeb(res), {
-        status: res.statusCode,
-        statusText: res.statusMessage,
-        headers: headersToInit(res.headers),
-      }));
-    });
-    req.on('error', reject);
-    onAbort(() => { try { req.destroy(); } catch {} });
-    if (body !== undefined && body !== null) req.write(body);
-    req.end();
-  });
 }
 
 // Bun 的 node:http 基于 fetch 实现：CONNECT 方法直接报 "fetch() URL is invalid"，
