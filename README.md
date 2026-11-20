@@ -1,1509 +1,210 @@
 # comm2api
 
-> [中文文档](README_zh.md)
+<p align="center">
+  <strong>High-performance reverse proxy converting Command Code API into OpenAI / Anthropic compatible endpoints</strong>
+</p>
 
-A reverse proxy that converts the Command Code API into OpenAI / Anthropic compatible endpoints. Single Node.js process, zero backend runtime dependencies, with a bundled Vue 3 admin panel (including official quota dashboards).
+<p align="center">
+  <strong>English</strong> | <a href="README_zh.md">简体中文</a>
+</p>
 
-Built by analyzing official CLI network traffic to accurately replicate the Command Code API request protocol, including device-fingerprint and lifecycle pre-requests.
+<p align="center">
+  <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg" alt="Node version" />
+  <img src="https://img.shields.io/badge/dependencies-zero-blue.svg" alt="Zero Dependencies" />
+  <img src="https://img.shields.io/badge/docker-ready-2496ed.svg" alt="Docker Ready" />
+  <img src="https://img.shields.io/badge/tests-350%2B%20pass-success.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License" />
+</p>
 
-**Features**: OpenAI Chat Completions / **Responses API (`/v1/responses`)** + Anthropic Messages API | Streaming & non-streaming | Tool calling (tool_use) | Multimodal image input | Reasoning effort | Dynamic model list | Cache hit metrics | Device fingerprint disguise (per-key, auto-refresh) | `x-api-key` auth (Anthropic SDK) | Client disconnect detection with upstream abort | Zero-output guard (429 non-streaming / response.failed streaming) | Consecutive timeout → 429 auto-retry | Privacy-aware logging | Anthropic server-side web search (`web_search_20250305` → Command Code's own `/alpha/web-search`, opt-in)
+---
 
-## Quick Start
+`comm2api` is a single-process Node.js service with **zero runtime dependencies**. It bridges Command Code upstream APIs into standard **OpenAI Chat Completions**, **Anthropic Messages**, and **OpenAI Responses API** formats, featuring a retro-brutalist Web admin dashboard and official quota-aware scheduling.
+
+Rigorously reverse-engineered and aligned 1:1 with the official CLI source code (`command-code@1.88.0`).
+
+---
+
+## ✨ Features
+
+- **3-in-1 Protocol Compatibility**:
+  - OpenAI `/v1/chat/completions` (Streaming SSE / Non-streaming, Function Calling, Multimodal Vision, Reasoning Effort `reasoning_content`)
+  - Anthropic `/v1/messages` (Native support for Claude Code, integrated `web_search_20250305` server tool execution)
+  - OpenAI Responses API (`/v1/responses`, built-in `: keepalive` SSE comments to prevent client timeout)
+- **Zero Runtime Dependencies**: Built purely on Node.js standard libraries (`node:http`, `node:crypto`, `node:fs`). Extremely lightweight, sub-second cold starts, tested by 350+ test suites.
+- **📊 Quota-Aware Multi-Account Scheduling (v2)**:
+  - Scrapes official quota windows (including the dynamic 5-hour rolling limit and plan status);
+  - Account health state machine (`available`, `quota_warning`, `quota_exhausted`, `rate_limited`) with automatic failover to healthy accounts;
+  - Sticky session support to preserve Prompt Cache hit rates.
+- **🌐 Outbound Proxy Pool & Key Binding**:
+  - Supports standard HTTP proxies and rotating residential proxy pools (`pool+` / `#pool`);
+  - Per-key proxy binding with transparent failover; unified outbound IP across generation, fingerprint, and lifecycle requests.
+- **🥷 Industrial-Grade Anti-Detection**:
+  - Deterministic hardware fingerprints per API Key (same key always masquerades as the same machine);
+  - Single-source hardware profile (`DEVICE_PROFILE`, Windows x64); never leaks host platform or environment details;
+  - Automated lone UTF-16 surrogate cleansing to prevent upstream 400 validation errors; blank system placeholder blocks implicit ~7.5K token default prompt injection.
+- **🛡️ Production Reliability & Backpressure**:
+  - Transparent pre-first-byte retry on transient connection resets (RST/FIN) with exponential backoff;
+  - TCP stream backpressure prevents memory exhaustion when downstream clients read slowly;
+  - Automatically learns and clamps model-specific physical `max_tokens` limits.
+- **🖥️ Retro-Brutalist Web Admin Dashboard**:
+  - Manage upstream accounts and issue 2API keys dynamically;
+  - Real-time quota metrics, local token usage analytics, and proxy health monitoring;
+  - Integrated model catalog management and live connectivity testing tools.
+
+---
+
+## ⚡ Quick Start
+
+### Method 1: Docker Compose (Recommended)
 
 ```bash
-cp config.json.example config.json      # First run: copy the template
-ADMIN_PASSWORD=your-admin-password pnpm start   # Listens on http://0.0.0.0:3050
-# Then open http://127.0.0.1:3050/admin/ and add your Command Code keys in the browser
-```
-
-> The template ships `proxyKey` and `apiKey` **empty** (feature off) and contains no placeholder
-> credentials — copying it will not silently enable strict auth or leave a publicly known password
-> in place. There are three ways to supply keys, pick any:
-> 1. **Admin panel** (recommended): add them at `/admin/`, stored in `data/keys.json`, effective immediately;
-> 2. `config.json` → `apiKey` (string or array);
-> 3. the `CC_API_KEY` environment variable (comma-separated).
->
-> Options 2 and 3 appear as **read-only** entries in the panel, where you can "import" them into
-> panel-managed entries with one click.
-
-API Key is passed via the `Authorization` request header (or `x-api-key` for Anthropic SDKs) — no need to store it in config files. Key must start with `user_` (automatically matched with any prefix, e.g. `Bearer token_user_xxx`):
-
-```bash
-curl http://127.0.0.1:3050/v1/chat/completions \
-  -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
-```
-
-> Bound to `0.0.0.0`, this means **anyone who can reach it may use the proxy** (with their own key).
-> To require a password instead, set `proxyKey` — see [Access control](#access-control).
-
-## How to use it (5-minute walkthrough)
-
-### 1. Start it
-
-```bash
+# 1. Copy configuration templates
 cp config.json.example config.json
-ADMIN_PASSWORD=your-admin-password pnpm start    # listens on 0.0.0.0:3050
-# different port: PORT=37000 ADMIN_PASSWORD=... pnpm start
-```
-
-Open `http://<host>:3050/admin/` and log in with `ADMIN_PASSWORD`. Without that variable the panel
-**refuses all access**.
-
-> Prefer not to `export` every time? `cp .env.example .env`, fill it in, and start — both the app and
-> Docker read it (see [Configuring with .env](#configuring-with-env-recommended)).
-
-### 2. Add an "upstream key" — your Command Code account key
-
-Panel → **🔑 Upstream Key** → paste the `user_…` key → **➕ Add**.
-
-- This is a **server-side credential**: the proxy calls Command Code with it. **Never hand it to a
-  client** — that gives away your account.
-- Effective **immediately, no restart**. Add several and they rotate by strategy, failing over on errors.
-- Want to take one out of rotation temporarily? Click **⏸ Disable** in its row — it leaves the
-  rotation pool at once while its config and usage stats are kept, and **▶ Enable** brings it back.
-  When every key is disabled the page shows a red warning (and all `/v1/*` calls return 500).
-
-### 3. Sync upstream models and choose which ones to expose
-
-Panel → **🧠 Models** → **🔄 Sync upstream models** (it reports what was added/removed) → tick the ones
-you want → **✅ Enable selected**.
-
-- A **disabled model** is no longer returned by `/v1/models`, and naming it explicitly returns **400** —
-  that is how you stop people from using it.
-- The header **select-all** checkbox plus `✅ Enable selected / 🚫 Disable selected` handles batches.
-- `⚡ Test` verifies one model, `🧪 Batch test` runs them all (limited concurrency, cancellable).
-  **Only enabled models can be tested.**
-
-### 4. (Optional, recommended) Issue a "2API key" for callers
-
-Panel → **🔐 2API Key** → **🎲 Generate & add** → copy the `ccp_…` value (shown in full only once).
-
-- Issuing one **turns access control on immediately**: callers must present it, and presenting an
-  upstream `user_` key instead gets a **401 that tells them which credential to use**.
-- The point is **per-client issuance and individual revocation** — one leak only revokes that client,
-  no account rotation needed.
-- Want no access control? **Issue nothing** (pass-through mode: callers bring their own upstream key).
-
-### 5. Point your client at it
-
-The base URL is this proxy; the key depends on the previous step:
-
-| Protocol | Base URL | Key |
-|---|---|---|
-| OpenAI Chat Completions | `http://<host>:3050/v1` | the issued `ccp_…` (or `proxyKey`); in pass-through mode your own `user_` key |
-| Anthropic Messages | same | same (`x-api-key` or `Authorization` both work) |
-| OpenAI Responses | same | same |
-
-```bash
-curl http://127.0.0.1:3050/v1/chat/completions \
-  -H "Authorization: Bearer ccp_your_2api_key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
-```
-
-### 6. Verify the link and watch usage
-
-- **📊 Dashboard → upstream connectivity test**: pick a model (only enabled ones are listed), edit the
-  test message (defaults to `你是谁，出来干活了`) and send. The result shows **the model's actual reply**
-  plus **the model and provider that actually served it** — the latter is how you confirm routing.
-- **📈 Usage**: per-key requests and tokens, with **input split into cache hit / miss** and output on
-  its own.
-- **📜 Request Log**: live SSE stream with pause, clear and level filter.
-- **⚙️ Settings**: rotation strategy, default test model, upstream proxy, log level — persisted and
-  effective immediately.
-
-## File Structure
-
-```
-commandcode/
-├── proxy.mjs             # Entry point + data plane (tuned for streaming/timeouts/backpressure)
-├── lib/                  # Server modules (zero runtime dependencies)
-│   ├── config.mjs        # Config load / hot reload / atomic write-back
-│   ├── store.mjs         # Atomic persistence (temp file + rename)
-│   ├── keys.mjs          # Key pool: rotation strategy, cooldown, usage, health
-│   ├── proxies.mjs       # Outbound proxy pool: entry parsing, health checks, key↔proxy binding
-│   ├── models.mjs        # Model catalog (upstream fetch + cache + static fallback) + test jobs
-│   ├── admin-auth.mjs    # Admin password (scrypt), sessions, login rate limiting
-│   ├── admin-api.mjs     # Admin REST API + SSE live logs
-│   ├── admin-ui.mjs      # Admin static asset hosting
-│   └── logbus.mjs        # Log ring buffer + subscribers
-├── web/                  # Admin UI (Vite + Vue 3)
-│   ├── src/              # Sources
-│   └── dist/             # Build output (generated by pnpm run build:web or Docker; not committed)
-├── data/                 # Runtime data (**not committed**): key pool, admin password, test results
-├── docs/
-│   ├── admin-api.md      # Admin API contract (the single frontend/backend interface)
-│   └── design-notes.md   # Design conventions (no TLS required, zero runtime deps, state in data/…)
-├── test/                 # Tests (node:test, no test-framework dependency)
-├── config.json.example   # Config template (copy to config.json)
-├── Dockerfile            # Two-stage build: builds the frontend, then produces the runtime image
-├── docker-compose.yml    # Container orchestration (prebuilt GHCR image)
-├── docker-compose.local.yml   # Local source-build orchestration
-├── .github/workflows/docker-publish.yml  # master/main/release or v* tag → GHCR multi-arch
-├── LICENSE               # MIT License
-├── README.md             # This document (English)
-└── README_zh.md          # Chinese documentation
-```
-
-> `data/` holds **plaintext upstream keys** (`keys.json`) and the **admin password hash**
-> (`.admin-auth.json`). It is excluded by both `.gitignore` and `.dockerignore`, so it never
-> reaches the repository or the image.
-
-## Configuration
-
-### config.json
-
-| Field | Default | Description |
-|------|--------|-------------|
-| `port` | `3000` | Listen port (repo config.json ships with `3050`) |
-| `host` | `0.0.0.0` | Listen address |
-| `apiBase` | `https://api.commandcode.ai` | CC API base URL |
-| `projectSlug` | `cc-proxy` | `x-project-slug` header |
-| `apiKey` | `""` | Upstream CC API key(s), string or array. Legacy field: new deployments should manage keys in the admin panel (written to `data/keys.json`); keys set here appear as **read-only** entries in the panel |
-| `strategy` | `round_robin` | Key rotation: `round_robin` / `random` (avoids consecutive repeats) / `fill` |
-| `defaultModel` | `""` | Default model used by key/model tests; empty = first catalog entry |
-| `logFile` | `""` | Log file path (empty = console only) |
-| `logLevel` | `info` | Log level |
-| `useProviderModels` | `true` | Dynamically fetch model list from Provider API |
-| `useProviderModelsWithPlanFilter` | `false` | Filter models by the subscription plan for the current API key |
-| `modelRefreshIntervalMs` | `300000` | Model list cache refresh interval (5 min) |
-| `zdr` | `false` | Request ZDR-only routing from Command Code |
-| `cliMode` | `agent` | Envelope `mode`. Upstream enum: `agent` / `learning` / `custom-agent` / `custom-agent-create` / `title-gen` / `tool-desc` / `compact` / `vision` |
-| `cliSessionMode` | `interactive` | `mode` inside the lifecycle metadata (**a different enum**: `interactive` / `non-interactive`) |
-| `fingerprintSalt` | `""` | Salt for the device fingerprint — use it to rotate the whole fleet's identity (one key still always reports one device) |
-| `deviceProjectDir` | `""` | Faked project directory (empty = built-in `C:\Users\dev\projects\app`); changing it gives every account a different device |
-| `emptySystemPlaceholder` | `true` | Send a space placeholder when there is no system prompt, preventing upstream from injecting its ~7.5K-token default |
-| `webSearch` | `false` | Serve the Anthropic server tool `web_search_20250305` via Command Code's `/alpha/web-search` (see [Web search](#web-search-anthropic-server-tool)) |
-| `proxies` | `[]` | **Outbound proxy pool**: an array of `direct` / `http://user:pass@host:port` / `pool+http://…` (rotating pool) entries — see "Outbound proxy pool" below |
-| `proxyFile` | `""` | One entry per line, relative to the directory of `config.json` |
-| `upstreamProxy` | `""` | Legacy single-proxy field; still fully supported and joins the pool as a `legacy` entry |
-
-> 📌 `config.json` is **deployment-time input**. The panel (`/admin/`) writes to
-> `data/settings.json` and never rewrites this file — which is why it is safe to mount read-only
-> under Docker. See [Web Admin Panel](#web-admin-panel) for the precedence rules.
-
-### Configuring with .env (recommended)
-
-Instead of exporting variables every time, put them in a `.env` at the project root —
-**works for both bare-metal and Docker**:
-
-```bash
 cp .env.example .env
-vim .env                     # at least set ADMIN_PASSWORD; add upstream keys in the panel instead
-pnpm start                    # the app reads .env itself
-```
 
-```bash
-# Docker: compose reads the .env next to it and injects it — no compose edits needed
-cp .env.example .env
+# 2. Set an admin dashboard password
+echo "ADMIN_PASSWORD=your_secure_password" >> .env
+
+# 3. Start the container
 docker compose up -d
 ```
 
-Every line in `.env.example` is commented; the common ones:
+Open your browser and navigate to `http://127.0.0.1:3050/admin/` to log into the admin dashboard.
 
-| Variable | Purpose |
-|---|---|
-| `ADMIN_PASSWORD` | **Panel password** (unset ⇒ the panel refuses all access) |
-| `PROXY_KEY` | Shared data-plane password (unnecessary once you use 2API keys) |
-| `CC_API_KEY` | Upstream keys, comma-separated (or add them in the panel) |
-| `CC_UPSTREAM_PROXY` | Route requests to the upstream through an HTTP proxy (legacy field; see "Outbound proxy pool") |
-| `CC_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
-| `CC_DATA_DIR` | Runtime data directory (must be a volume under Docker) |
-| `PROXY_PORT` | Host port to publish (compose only) |
+### Method 2: Local Node.js
 
-**Precedence (highest first):** real environment variable > `.env` > `data/settings.json`
-(panel writes) > `config.json` > built-in defaults.
+```bash
+cp config.json.example config.json
+pnpm install
+ADMIN_PASSWORD=your_secure_password pnpm start
+```
 
-- A variable already `export`ed in your shell **beats `.env`** (deliberate, for temporary overrides).
-- Parsing is deliberately simple: `KEY=VALUE`, `#` comments, blank lines; matching surrounding quotes
-  are stripped; **an empty value counts as unset**.
-- The startup banner reports whether `.env` was loaded and which **names** (never values — it holds
-  passwords).
-- `.env` is excluded by both `.gitignore` and `.dockerignore`, so it is neither committed nor baked
-  into the image.
+The service will listen on `http://0.0.0.0:3050` by default.
 
-### Environment Variables
+---
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` (shipped config.json uses `3050`) | Listen port → `port` |
-| `HOST` | `0.0.0.0` | Listen address → `host` |
-| `PROXY_KEY` | unset | Data-plane access password → `proxyKey`; non-empty enables strict auth |
-| `CC_API_KEY` | unset | Upstream CC API key(s) → `apiKey`, comma-separated (appear as read-only entries in the key pool) |
-| `ADMIN_PASSWORD` | unset | **Admin panel** password (a separate credential from `proxyKey`). **Unset ⇒ `/admin/` refuses all access** |
-| `CC_DATA_DIR` | `<project>/data` | Runtime data dir (key pool / admin password / test results). Mount a volume under Docker |
-| `CC_LOG_LEVEL` | `info` | Log level → `logLevel` |
-| `CC_API_BASE` | `https://api.commandcode.ai` | Upstream base URL → `apiBase` |
-| `CC_UPSTREAM_PROXY` | *(unset)* | Route requests **to the CC upstream** through an HTTP proxy (`http://` CONNECT only); see "Outbound proxy pool" below → `upstreamProxy` |
-| `CC_PROXIES` | *(unset)* | Outbound proxy pool, comma separated (`pool+` / `#pool` rotate markers supported) → `proxies` |
-| `CC_PROXY_FILE` | *(unset)* | Path to a one-entry-per-line proxy file → `proxyFile` |
-| `CC_PROXY_HEALTH_INTERVAL_MS` | `900000` | How often unhealthy proxies are rechecked (15 min) |
-| `CC_PROXY_HEALTH_TIMEOUT_MS` | `10000` | Timeout of one health check (ms) |
-| `CC_PROXY_PROBE_TIMEOUT_MS` | `10000` | Timeout of one admin "test" probe (ms) |
-| `PROJECT_SLUG` | `cc-proxy` | `x-project-slug` → `projectSlug` |
-| `LOG_FILE` | empty | Log file → `logFile` (**synchronous writes**, see [Other notes](#other-notes)) |
-| `CC_USE_PROVIDER_MODELS` | `true` | Fetch the model list dynamically → `useProviderModels` |
-| `CMD_ZDR` | off | `1` enables ZDR-only routing → `zdr` |
-| `CC_CLI_MODE` | `agent` | Envelope `mode` → `cliMode` |
-| `CC_CLI_SESSION_MODE` | `interactive` | Lifecycle metadata `mode` → `cliSessionMode` |
-| `CC_FINGERPRINT_SALT` | empty | Fingerprint salt → `fingerprintSalt` |
-| `CC_DEVICE_PROJECT_DIR` | empty | Faked project directory → `deviceProjectDir` |
-| `CC_EMPTY_SYSTEM_PLACEHOLDER` | `true` | Space placeholder for a missing system prompt; `false` disables → `emptySystemPlaceholder` |
-| `CC_MAX_BODY_MB` | `100` | Max request body size in MB; oversized requests get `413` |
-| `CC_MAX_TOOL_IMAGE_MB` | `6` | Total per-request budget for tool screenshots (base64); older ones become a placeholder; `0` disables. See [Tool screenshot budget](#tool-screenshot-budget) |
-| `CC_STREAM_IDLE_MS` | `180000` | Streaming upstream read idle timeout; see [Upstream idle timeouts](#upstream-idle-timeouts) |
-| `CC_NONSTREAM_IDLE_MS` | `90000` | Non-streaming upstream read idle timeout |
-| `CC_UPSTREAM_RETRY_MAX` | `2` | Retries for upstream disconnects **before any byte is written downstream**; `0` disables; see [Upstream transient retry](#upstream-transient-retry) |
-| `CC_UPSTREAM_RETRY_BASE_MS` | `400` | Backoff base in ms; the actual delay is base × attempt number |
-| `CC_MAX_INFLIGHT` | `0` (unlimited) | In-process request cap; over-limit returns `503`; see [In-flight cap](#in-flight-cap-optional) |
-| `CC_CLIENT_DRAIN_TIMEOUT_MS` | unset (disabled) | Drop the client once downstream backpressure blocks longer than this; see [Stalled clients](#stalled-clients-neither-reading-nor-disconnecting) |
-| `CC_KEEPALIVE_TIMEOUT_MS` | `65000` | Backend keep-alive timeout (`headersTimeout` is set to +1s automatically). **Must be larger than the reverse proxy's keepalive_timeout** — see [keep-alive ordering](#suggested-nginx-front) |
-| `CC_WEB_SEARCH` | off | `1` serves the Anthropic server tool `web_search_20250305` via Command Code's `/alpha/web-search`; see [Web search](#web-search-anthropic-server-tool) → `webSearch` |
-| `CC_WEB_SEARCH_TIMEOUT_MS` | `8000` | Timeout for one `/alpha/web-search` call (ms) |
+## 🔑 Core Concept: Two Kinds of Keys
 
-When enabled, the proxy sends `x-cmd-zdr: 1` on Command Code generation requests
-and the fingerprint/lifecycle initialization requests. It does not add the header
-to the npm version check or the proxy's `/provider/v1/models` catalog request.
-This requests Command Code's ZDR-only routing; the upstream service remains the
-authority for actual retention and provider availability.
+This project clearly decouples **Upstream Keys** from **2API Keys** to protect credentials:
 
-**Request body limit**: independent of `config.json` — requests larger than **100 MB** are rejected with `HTTP 413` (the connection is kept alive and drained, not reset). Override with `CC_MAX_BODY_MB` (positive integer, unit: MB).
-
-> ⚠️ **Memory amplification**: a request body exists in several copies before it reaches upstream; measured peak ≈ body size × **5.1–7.4** (7 MB → +52 MB, 20 MB → +116 MB, while a request rejected with `413` costs only ×1.05). The default `CC_MAX_BODY_MB=100` therefore implies up to ~550 MB for a **single** request, and that limit is per-request, not global. See [Memory & Deployment](#memory--deployment).
-
-### Device fingerprint
-
-Relevant config: `fingerprintSalt` / `CC_FINGERPRINT_SALT`, `deviceProjectDir` / `CC_DEVICE_PROJECT_DIR`.
-
-The device fingerprint reported to `/alpha/fingerprint/record` is **derived deterministically** from the API key (`fpDigest(apiKey, field) = sha256(salt + "\\0" + apiKey + "\\0" + field)`), so one key is always one device:
-
-| Event | Old behaviour (random) | Now (derived) |
+| Aspect | Upstream Key | 2API Key (Downstream Key) |
 |---|---|---|
-| Process restart | Map cleared → **new machine** | same machine |
-| Second instance | same key = **two machines** | same machine |
-| Session expiry / key-state eviction | entry dropped → **new machine** | same machine (re-derived) |
+| **Format** | Starts with `user_` | Starts with `ccp_` |
+| **What it is** | Official Command Code account token | Custom token issued by this proxy |
+| **Used by** | The proxy server (to call upstream CC API) | End clients / Applications / Team members |
+| **Leak Risk** | Critical (surrenders account access) | Safe (can be revoked or limited in panel) |
+| **Management** | Admin Panel `/admin/` 🔑 Upstream Keys | Admin Panel `/admin/` 🔐 2API Keys |
 
-> Session expiry was the visible one: the store dropped a key's state every 12h, and a real user does not replace their computer twice a day. That store is gone — `x-session-id` is now derived from request content, so nothing expires. Key-state eviction remains (24h idle), but dropping the entry no longer rotates the fingerprint, because it is re-derived to the same value. Upstream's `device_fingerprints` table is still keyed on `(userId, thumbmark)`.
+---
 
-**Why derived rather than "pick a device from a hash bucket"** — a fixed pool caps entropy at the pool size, so once the number of keys exceeds it, keys *must* share a fingerprint. With ~50 keys and a 1000-entry pool, ~2 keys collide; with a 100-entry pool, ~20 do. A shared `thumbmark` under two different `userId`s is direct evidence of multi-account-same-machine — exactly what you don't want to manufacture. Derivation keeps every key a distinct device (collision probability 2⁻²⁵⁶) while still being stable.
+## 💻 Client Integration Examples
 
-```bash
-CC_FINGERPRINT_SALT=some-local-secret pnpm start   # optional: bulk-reset every key's device identity
-CC_DEVICE_PROJECT_DIR='C:\\Users\\you\\projects\\app' pnpm start   # optional: change the fabricated project dir (slug follows)
-```
+Once the proxy is running and you have issued a `ccp_` token, connect your favorite AI tools:
 
-The salt is optional but recommended: without it the derivation is a pure function of the API key, so anyone who knows the scheme could recompute your users' fingerprints. With it, the same key yields different devices on different deployments, at no cost.
+### 1. cURL (OpenAI Chat Completions)
 
-**The signal values are fabricated too.** The official CLI reads the real machine (Windows registry MachineGuid, NIC MACs, `os.userInfo`, `git config`); this proxy derives plausible-looking substitutes from the API key — MachineGuid's `8-4-4-4-12` shape, `xx:xx:xx:xx:xx:xx` MACs, a `DESKTOP-xxxxxx` hostname, a readable git email. Those raw values never leave process memory; only their hashes go on the wire.
-
-**Pool selection scores-and-takes-the-max rather than using modulo** — modulo would rotate *every* key's device whenever the pool grows; taking the max only affects keys where the new candidate happens to win.
-
-The hash construction follows the official CLI (`buildMachineFingerprint` / `hashSignal` in `command-code`) — `thumbmark = sha256(IB + "\0machine\0" + [machineId, macs.join(",")].join("|"))` with `IB = "command-code:device-fingerprint:v1"`, and each component hashed as `sha256(IB + "\0" + value.toLowerCase())`. The previous implementation hashed random hex without the `IB` prefix and built the thumbmark from the component *hashes*; upstream cannot recompute either way (it never sees the raw `machineId`), so it was undetectable — but it is now aligned.
-
-> Not addressed here: the appearance pool is still all high-end desktop CPUs and the timezone is drawn uniformly from a global pool.
->
-> `timezone` is the **client machine's OS timezone** (`Intl.DateTimeFormat().resolvedOptions().timeZone`), *not* the egress IP's. So do **not** bind it to the egress IP: a user in mainland China reaching this service through a proxy normally has a machine timezone that does not match where the traffic exits, and that mismatch is the norm rather than an anomaly.
->
-> The property that matters is therefore the **distribution across your own user base**, not agreement with the IP. If your users are concentrated in one region, drawing timezones uniformly from 15 global zones makes every account look like it belongs to a different continent. Set the pool to match who actually uses the deployment — this is an operator decision, and for a single-region user base it means narrowing (or weighting) `FINGERPRINT_TZS` rather than randomising it globally.
-### Tool screenshot budget
-
-Images inside tool results are sent upstream as **separate** `image` blocks (an `input_image` inside
-`function_call_output.output` is no longer `JSON.stringify`-ed into the tool-result text). Base64 is extremely
-expensive once upstream tokenizes it as **text** — a single 2.76 MB Codex Desktop screenshot measured
-≈ **1.92M tokens**, blowing straight through a 1M window:
-
-```
-400 This model's maximum context length is 1048576 tokens. However, you requested
-    1986800 tokens (1922800 in the messages, 64000 in the completion)
-```
-
-Images are still **re-sent in full every turn**: one real session carried 11 screenshots ≈5.5 MB of base64,
-which — with the memory amplification above (×5.1–7.4) — pushed the proxy to `anon-rss 532 MB` and triggered a
-**global OOM** on a 1 GB box. `CC_MAX_TOOL_IMAGE_MB` (default `6`) keeps the **newest** images within budget
-(at least one) and replaces the rest with `[older tool screenshot omitted: image budget exceeded]`, so the model
-knows an image was dropped instead of assuming none ever existed. Only tool screenshots are affected; images
-you attach yourself are untouched.
-
-> Raise the budget if the model really needs every screenshot, but size memory as `budget × in-flight × 5–7`
-> (see [in-flight cap](#in-flight-cap-optional)).
-
-### Outbound proxy pool (`proxies` / `proxyFile` / `upstreamProxy`)
-
-Route the requests the proxy makes **to Command Code** through one or more egresses — for egress-region switching, spreading accounts across IPs, or comparing IPs when debugging risk-control `403`s.
-
-Three configuration paths (all may be used together; they merge into one pool):
-
-```json
-{
-  "proxies": [
-    "http://user:pass@127.0.0.1:7890",
-    "pool+http://user:pass@pool.example.com:8080",
-    "http://user:pass@1.2.3.4:8080#pool",
-    "direct"
-  ],
-  "proxyFile": "proxies.txt"
-}
-```
-
-```bash
-# comma separated; the file path can come from the environment too
-CC_PROXIES='http://127.0.0.1:7890,pool+http://pool.example.com:8080' pnpm start
-CC_PROXY_FILE=/etc/cc-proxies.txt pnpm start
-
-# legacy single-proxy field, still fully supported
-CC_UPSTREAM_PROXY=http://127.0.0.1:7890 pnpm start
-```
-
-`proxyFile` holds one entry per line, relative to the directory of `config.json`; blank lines, a BOM and `#` / `;` / `//` comments are ignored (the `#pool` marker and the `//` of a URL are not comments).
-
-#### Rotating proxy pools (`pool+` / `#pool`)
-
-Prefix an entry with `pool+` or suffix it with `#pool` to declare a **rotating proxy pool** (such as [Resin](https://github.com/Resinat/Resin)), where every new TCP connection exits from a different IP. Both spellings are equivalent:
-
-```text
-pool+http://user:pass@pool.example.com:8080
-http://user:pass@pool.example.com:8080#pool
-```
-
-- A rotating entry **never records health**: its egress differs every time, so one failure says nothing about the pool.
-- Rotating entries are preferred for the "rotate per attempt" binding, so each attempt gets a fresh egress IP.
-
-#### Key ↔ proxy binding
-
-Each upstream key can choose which proxy carries it. Three modes, switchable on the admin **Outbound proxy pool** page:
-
-| Mode | Behaviour | When to use it |
-|---|---|---|
-| **auto** (default) | Static `i % N` assignment, moving to the least-loaded **healthy** proxy on failure, and moving back once it recovers | Almost always |
-| **bind** | Always the one you picked, never migrated even if it fails | When "this account must leave from this IP" |
-| **rotate** | A fresh healthy proxy per attempt | When you want a different IP every time |
-
-- Bindings live in `data/proxies.json`; `config.json` is never rewritten.
-- **Traffic is spread across every entry in the pool**: the default `auto` mode assigns `i % N`, so key 1 uses proxy 1, key 2 uses proxy 2, and so on. Configure a single entry if you want everything to leave from one place. Upgrading from the legacy single-proxy field keeps it in the pool as a `legacy` entry, which the first key keeps using.
-- Disabling or deleting a bound proxy **falls the binding back to auto** and says so — failing silently would be worse.
-- `bind` refuses a disabled proxy: pinning to one would mean that key can never leave.
-
-#### Health and failover
-
-- Every proxy tracks its own health, consecutive failures and cooldown. Only **route-level failures** (connection refused, tunnel timeout, TLS failure) count against a proxy — an upstream 4xx/5xx means the proxy worked and the problem is account- or model-level.
-- When a proxy is unreachable the proxy retries **the same key through another proxy**, not another key: switching keys cannot fix a dead proxy and would wrongly mark good accounts as failed.
-- The admin page can probe one proxy, or **select several and probe them in one batch**: the test passes on **any HTTP response** (401/403 included). Batch concurrency is server-side (4 by default, 8 max); one call returns the complete result table in the order you selected, a single failure does not affect the rest, and a batch is capped at 200 entries.
-- A scheduled health check rechecks unhealthy proxies every 15 minutes by default (`CC_PROXY_HEALTH_INTERVAL_MS`), with probe timeouts of `CC_PROXY_HEALTH_TIMEOUT_MS` / `CC_PROXY_PROBE_TIMEOUT_MS` (10 s default). It only covers **enabled** entries: a disabled proxy carries no traffic, so probing it would be pure waste, and a rotating pool's egress differs every time anyway.
-
-#### Coverage
-
-- Applies to `/alpha/generate`, `/alpha/fingerprint/record`, `/alpha/lifecycle-events`, `/provider/v1/models` and `/alpha/web-search`.
-- Routing a key's fingerprint/lifecycle pre-requests through **the same proxy as its generation** is deliberate: going out direct while generation used a proxy would make one account register from two different IPs — exactly the inconsistency you are trying to avoid.
-- **Does not** touch the local listener, `/health`, or the npm version check.
-- Only `http://` (CONNECT) proxies are supported. Implemented with a plain CONNECT tunnel plus `node:https` reusing the same socket, so there is **no new dependency** and it works on Node 18+.
-- Each upstream request opens its own tunnel connection. TLS is end-to-end: the certificate is validated against the **target hostname**, never against the proxy.
-- Credentials in the proxy URL (`http://user:pass@host:port`) never appear in lists, logs or error messages: only `host:port` does. The admin page offers an explicit reveal (which writes an audit log line) when you need the full URL.
-
-> Node's built-in `fetch` does **not** read `HTTPS_PROXY`/`HTTP_PROXY`. The official env-var route requires Node ≥ 22.21 / 24.5 plus `NODE_USE_ENV_PROXY=1`; this option works without either.
-
-## Two kinds of key: upstream vs 2API
-
-These are **completely different** and the most common source of confusion:
-
-| | 🔑 Upstream Key | 🔐 2API Key |
-|---|---|---|
-| **What** | Command Code account key (`user_…`) | A key this proxy issues (`ccp_…`) |
-| **Who uses it** | **The server itself** — the proxy calls Command Code with it | **Downstream clients** — they call this proxy with it |
-| **Share it?** | Never — that hands over your account | Yes, it exists to be handed out |
-| **Managed where** | Panel → 🔑 Upstream Key | Panel → 🔐 2API Key |
-| **Stored in** | `data/keys.json` | `data/api-keys.json` |
-| **Comes from** | panel / `config.json` `apiKey` / `CC_API_KEY` | issued in the panel only |
-
-The full path of one request:
-
-```
-downstream client --(2API Key)--> this proxy --(one upstream Key, by strategy)--> Command Code
-```
-
-**Why separate them**: a leaked upstream key means replacing the whole account, while a 2API key can
-be issued per client so a leak only revokes that one client. Mixing them tangles "who may call" with
-"whose account pays".
-
-### Access control
-
-| Mode | Condition | Client sends | Upstream key used |
-|------|-----------|--------------|-------------------|
-| **Pass-through** (default) | no 2API key ever issued, no `proxyKey` | its own `user_` key | the client's |
-| **2API Key** (recommended) | any 2API key issued | `ccp_…` (issue/revoke per client) | picked from the pool; the client never sees it |
-| **proxyKey** (legacy) | `proxyKey` set in `config.json` | that single password | picked from the pool |
-
-> ⚠️ The trigger is "**ever issued**", not "currently enabled". Otherwise disabling the last 2API key
-> would silently fall back to pass-through — i.e. turn access control *off*. That direction is too
-> dangerous, so the proxy fails closed with 401 instead. To disable protection, delete **all** 2API keys.
-
-The quickest way to require credentials: open Panel → 🔐 2API Key → **🎲 生成并添加**.
-Protection takes effect **immediately, no restart**:
-
-```bash
-# clients call like this (ccp_… is a 2API key, not an upstream key)
-curl http://127.0.0.1:3050/v1/chat/completions \
-  -H "Authorization: Bearer ccp_xxxxxxxx_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
-```
-
-Auth failures:
-
-| Case | Status | Message |
-|------|--------|---------|
-| No credential | `401` | `Missing API key. Send in Authorization: Bearer <key> or x-api-key header` |
-| Wrong / disabled credential | `401` | `Invalid API key` |
-| **Upstream key used as a client credential** | `401` | `This proxy requires a 2API key issued in the admin panel…` |
-| Upstream key pool empty | `500` | `Server upstream API key not configured` |
-
-The third row is deliberate: handing an upstream key to a client is the classic mistake, and naming
-the right credential is far more useful than a bare `Invalid API key`.
-
-## Web Admin Panel
-
-Open `http://<host>:<port>/admin/` to manage keys, models and settings. **Every change takes
-effect immediately — no restart.**
-
-### Password
-
-The panel **refuses all access** until a password is set:
-
-```bash
-ADMIN_PASSWORD=your-admin-password pnpm start
-# Docker: put ADMIN_PASSWORD=... in a .env file next to your compose file
-```
-
-- The admin password and the data-plane `proxyKey` are **two separate credentials**: one is for
-  whoever opens the panel, the other for clients calling `/v1/*`. Mixing them makes panel login
-  and API access constrain each other.
-- Change it later under **Settings**: stored as a scrypt hash in `data/.admin-auth.json`
-  (mode 600), takes precedence over the environment variable, and invalidates all other sessions.
-- Login rate limiting: 5 failures per source IP within 15 minutes locks that source for 15 minutes
-  (the reference implementation has no such layer, while the panel is often bound to `0.0.0.0`).
-- Session cookie: `admin_session`, `HttpOnly`, `SameSite=Lax`, fixed 24h TTL, in-memory
-  (a restart requires logging in again).
-
-> The panel does not provide TLS itself, same as the reference project — nothing extra is needed
-> for LAN use. Only if you expose it to the public internet, put a reverse proxy with HTTPS in
-> front of it (the password is submitted in cleartext).
-
-### Features
-
-| Page | Contents |
-|------|----------|
-| 📊 Dashboard | Key / model / request / token stats, upstream connectivity test |
-| 🔐 **2API Keys** | Calling credentials issued to **downstream clients**: generate, revoke individually, enable/disable, reveal, per-key request counts. The page opens with a "differences between the two key types" table |
-| 🔑 **Upstream Keys** | Command Code account credentials (`user_`): add/edit/delete, **one-click ⏸ disable / ▶ enable**, 👁 reveal, ⚡ real probe, import from `config`/`env`, rotation strategy |
-| 🧠 Models | **🔄 Sync upstream models**, **multi-select / select-all then batch enable or disable**, single-model test, batch test (limited concurrency, cancellable); only enabled models can be tested |
-| 🌐 **Outbound proxy pool** | Add / bulk-paste / enable / disable / **probe one or a selected batch** / reveal credentials; **key ↔ proxy binding** (auto / bind / rotate), with health, consecutive failures, cooldown and how many keys each proxy carries |
-| 📈 Usage | Per-key requests / failures / tokens (today and total): **input split into cache hit / miss, output on its own**, resettable |
-| 📜 Request Log | **SSE live stream** (not polling) with pause, clear and level filter |
-| ⚙️ Settings | Hot-update runtime config (including the **default test model**), change the admin password |
-
-### Key sources
-
-| Source | Stored in | Editable |
-|--------|-----------|----------|
-| `ui` | `data/keys.json` | ✅ add/edit/delete in the panel |
-| `config` | `config.json` → `apiKey` | ❌ read-only; use "import" to copy into `ui` |
-| `env` | `CC_API_KEY` | ❌ read-only; same |
-
-All three merge into **one rotation pool**; the same key never appears under two sources (`ui` wins).
-
-**One-click disable / enable.** The row button `⏸ Disable` / `▶ Enable` takes effect immediately:
-
-| After disabling | Detail |
-|---|---|
-| Leaves the rotation pool at once | It is genuinely not used upstream any more — not just flagged |
-| Config and stats kept | Key, label, usage and health records all stay; **▶ Enable** brings it back |
-| Row is dimmed | The header counters read `N total · X enabled · Y disabled` |
-| If every key is disabled | **All `/v1/*` calls return 500**, and the page shows a red warning — an explicit failure rather than silently sourcing a credential elsewhere |
-
-> Read-only keys (`config` / `env`) are refused by the server with the reason (import them first to
-> manage them). The button stays clickable on purpose: being told why beats guessing.
-
-**Rotation strategies:** `round_robin` (default), `random` (with consecutive-repeat avoidance —
-pure random tends to hammer a single account; after 8 repeats avoidance is dropped to break
-deadlocks), `fill` (drain the first usable key before moving on).
-
-**Failover and cooldown:** on `401/402/403/429/5xx` the proxy retries with another key, up to
-`min(key count, 3)` attempts per request. Failures judged key-related put that key into cooldown:
-
-| Failure | Cooldown |
-|---|---|
-| Quota exhausted (`USAGE_EXCEEDED`) | 10 min |
-| Key invalid (`UNAUTHORIZED`) | 30 min |
-| Network error / timeout | 5 min |
-| Other upstream errors | none, counted only |
-| **Model not in plan** (`MODEL_NOT_IN_PLAN`) | **none** — that is a model-level verdict, not a key failure |
-
-> Cooldown is **our own heuristic**, not an authoritative upstream verdict. So when every key is
-> cooling down the proxy does not refuse service — it falls back to the key whose cooldown expires
-> soonest. Refusing service because of our own heuristic would be a self-inflicted outage.
-
-### Usage statistics
-
-The **📈 Usage** page accounts per **key**. Input tokens are split into **three cache buckets**:
-
-| Metric | Meaning |
-|--------|---------|
-| **Input · cache hit** (cache read) | The portion served from the prefix cache — cheapest, and this ratio directly shows whether caching works |
-| Input · cache write | The portion that created cache entries (usually billed differently again) |
-| Input · cache miss | Neither hit nor written — genuinely "new" input |
-| Output | Tokens generated by the model |
-
-The three buckets **always sum to total input** (when upstream omits the detail everything counts as a
-miss — better to report a miss than to invent a hit). The page shows the **hit rate**
-(hits / total input), and the dashboard's token card shows it too.
-
-> Numbers come from the upstream-reported usage, not local estimates. Both "today" and "total" are
-> tracked in `data/keys.json`, with "today" rolling over automatically.
-
-### Model catalog and model tests
-
-The catalog comes from the Command Code upstream `GET /provider/v1/models` (5-minute cache) and
-keeps the upstream `context_length` and `supported_endpoints`. If upstream is unreachable it falls
-back to a built-in static list, and the panel explicitly marks those as `static`
-(`fromUpstream: false`) instead of pretending the sync succeeded.
-
-A **model test** sends one minimal real request with a chosen key and classifies the result by
-upstream error code: `ok` / `unauthorized` / `quota` / `not_in_plan` (the key is valid, the model
-is not in your plan) / `network` / `error`.
-
-> The reference project verifies "paid" models with a **balance-delta probe** (read the account
-> balance, run the model, read it again — a drop means the model is billed). That mechanism **cannot
-> be ported** to Command Code: `/provider/v1/usage`, `/provider/v1/balance` and `/api/v1/users/me`
-> all return 404 — CC exposes no balance or usage API. Hence the direct classification above:
-> whether it works, and why not, is answered by the upstream error code itself.
-
-#### Model management
-
-The Models page has a **🔄 同步上游模型** (sync upstream models) button that refetches the catalog
-and reports what changed (`共 82 个模型，新增 2，移除 1`). It also auto-syncs every 5 minutes.
-
-**Enable / disable** works at three granularities: a per-row toggle, multi-select
-(**✅ 启用所选** / **🚫 禁用所选**), and a header select-all checkbox (with indeterminate state)
-for the same two batch actions.
-
-**Disabling is real** — it takes effect in two places, otherwise the flag would be decorative:
-
-| Where | Behaviour |
-|-------|-----------|
-| `GET /v1/models` | Disabled models are **no longer returned**; clients cannot discover them |
-| Explicit request | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` all return **400** saying the model is disabled |
-| Models absent from the catalog | **Still passed through** — the catalog can be stale, and "not listed" must not block requests that would otherwise work |
-
-State lives in `data/models.json` as a **sparse disabled set** (only disabled ids are recorded):
-
-- New upstream models are **enabled** by default — no per-model record needed;
-- An upstream hiccup that drops models from the response cannot wipe your enable list;
-- If upstream later re-adds a previously disabled model, it stays disabled (deliberate — no silent revival).
-
-Disabling the current default model warns you and falls back to the first enabled model; batch tests
-also default to **enabled models only** when no explicit list is given.
-
-> Disabled ids no longer present upstream are reported as a count (`staleDisabled`) but never
-> auto-pruned — auto-pruning would turn a transient upstream blip into "your settings got wiped".
-
-#### Confirming the test really hit the model you picked
-
-Results include a **"served by `<modelId>` @ `<provider>`"** line taken from the upstream-reported
-metadata — that is the reliable way to verify routing (green ✓ when it matches, red plus an
-explanation when it does not).
-
-> ⚠️ **Never judge by the model's self-description.** Asking "which model are you" is not trustworthy —
-> the same `deepseek/deepseek-v4.1-flash` called DeepSeek 3 times out of 5 and Claude the other 2;
-> Kimi / GLM / Qwen mostly claim Claude too. Models have no introspective access to their own
-> identity and answer from training-data priors. **Trust the metadata.**
-
-Note the token budget deliberately differs between single and batch tests: single gets enough (4096)
-to show a full answer, batch gets 256 purely to classify — otherwise dozens of models would be slow
-and expensive.
-
-#### Default test model
-
-**Settings → default test model**: the dashboard's model dropdown **pre-selects** it (falling back to
-the first enabled model), and you can still pick another one just for that test. It is also the
-fallback when a client calls `/v1/*` **without a `model`** — so if you only enable one or two models,
-set it to one of them.
-
-#### Test message
-
-Connectivity tests, model tests and key tests all send the **same prompt**, defaulting to the
-reference project's value:
-
-```
-你是谁，出来干活了
-```
-
-- Editable in three places — Dashboard → connectivity test, Models, and Keys → rotation strategy —
-  and shared across all of them (it survives navigation), with a `↺ 恢复默认` reset button.
-- Left blank it falls back to the default; an empty prompt is never sent.
-- Max 4000 characters; a non-string or over-long value returns 400 with the reason.
-- Results echo the text that was **actually sent** (`prompt`), which is what you want when asking
-  "so what exactly went upstream?".
-- The default lives in exactly one place (the backend); the frontend prefills from
-  `GET /admin/api/config`'s `defaultTestMessage`. Duplicating it in two places would drift.
-
-### Hot reload
-
-| Change | How it takes effect |
-|--------|--------------------|
-| Add/edit/delete/enable keys | Next request (`keys.json` is written immediately) |
-| Rotation strategy / default model / ZDR / log level | Immediately, written to `data/settings.json` |
-| Upstream HTTP proxy | Tunnels rebuilt immediately |
-| `proxyKey` | Immediately |
-| Port / listen address | **Restart required** (the panel says so) |
-
-Settings are written to **`data/settings.json`**, *not* `config.json`. The reason: under Docker
-`config.json` is a **single-file bind mount** (and `:ro`), while atomic writes use
-"temp file + rename" — and `rename()` onto a single-file mount point fails with `EBUSY`. The change
-would land in memory only, the host file would stay untouched, and it would vanish on container
-recreation. `data/` is a directory mount where rename works, so all mutable state lives there
-(the reference project uses the same architecture). `config.json` can therefore stay read-only,
-which matters because it also holds secrets like `proxyKey`.
-
-**Precedence:** `environment` > `data/settings.json` (panel writes) > `config.json` > built-in
-defaults. The panel writes only the **fields it changed** (a sparse overlay), so fields it never
-touched still follow `config.json`. `GET /admin/api/config` reports each field's origin
-(`settingSources`), and a save that conflicts with `config.json` says so explicitly.
-
-Hand-editing `config.json` also hot-reloads (mtime polled every 3 s — more portable than
-`fs.watch`). Fields pinned by an environment variable cannot be changed from the panel at all
-(neither persisted nor applied in memory), and the response lists exactly which ones.
-
-### Data files
-
-| File | Contents | Mode |
-|------|----------|------|
-| `data/keys.json` | **Upstream keys** (Command Code account credentials, **plaintext**) | 600 |
-| `data/api-keys.json` | **2API keys** (credentials issued to downstream clients, **plaintext**) | 600 |
-| `data/settings.json` | Settings changed from the panel (sparse overlay) | 600 |
-| `data/.admin-auth.json` | scrypt hash of the **admin panel** password | 600 |
-| `data/proxies.json` | Outbound proxy pool: admin-added entries, disabled-entry fingerprints, **key ↔ proxy bindings** | 600 |
-| `data/models.json` | Disabled model ids (sparse set) | 600 |
-| `data/model-tests.json` | Results of the last batch test | 600 |
-
-> Three different secrets, easily confused: `data/keys.json` is the **upstream account**
-> credential, `data/api-keys.json` is the **downstream client** credential, and
-> `data/.admin-auth.json` is the **panel login** password.
-
-Change the location with `CC_DATA_DIR`. **Docker deployments must mount this directory**, or the
-panel configuration is lost when the container is recreated.
-
-### Frontend development
-
-The panel is Vite + Vue 3 with sources in `web/`:
-
-```bash
-pnpm run build:web     # build into web/dist (served by the proxy)
-pnpm run dev:web       # HMR dev server
-```
-
-When not built, `/admin/` serves an explicit "frontend not built" page (the data plane is
-unaffected). The Docker build runs the frontend build for you.
-
-## API Endpoints
-
-### `POST /v1/chat/completions`
-
-OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool calling, multimodal image input, and reasoning effort.
-
-**Request parameters:**
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `model` | Yes | Model ID (see model list) |
-| `messages` | Yes | Conversation messages, supports `system/user/assistant/tool` roles |
-| `max_tokens` | No | Max tokens to generate (default 64000) |
-| `stream` | No | SSE streaming (default false) |
-| `temperature` | No | Sampling temperature (0-2) |
-| `reasoning_effort` | No | Reasoning intensity: `low`/`medium`/`high`/`max` |
-| `tools` | No | Tool definitions (OpenAI function calling format) |
-| `tool_choice` | No | Tool selection strategy |
-| `parallel_tool_calls` | No | Allow parallel tool calls |
-
-**Simple request:**
-```json
-{
-  "model": "deepseek/deepseek-v4-flash",
-  "messages": [{ "role": "user", "content": "hello" }],
-  "stream": true
-}
-```
-
-**Multimodal image input (vision model required):**
-```json
-{
-  "model": "xiaomi/mimo-v2.5",
-  "messages": [{
-    "role": "user",
-    "content": [
-      { "type": "text", "text": "Describe this image" },
-      { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } }
-    ]
-  }]
-}
-```
-
-**Tool calling:**
-```json
-{
-  "model": "deepseek/deepseek-v4-flash",
-  "messages": [...],
-  "tools": [{
-    "type": "function",
-    "function": { "name": "get_weather", "description": "...", "parameters": {...} }
-  }],
-  "tool_choice": "auto"
-}
-```
-
-**Streaming response (SSE):**
-```
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"thinking..."}}]}
-
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"}}]}
-
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"prompt_tokens_details":{"cached_tokens":8}}}
-
-data: [DONE]
-```
-
-**Non-streaming response (with cache hits):**
-```json
-{
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "created": 1234567890,
-  "model": "deepseek/deepseek-v4-flash",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "Hello!",
-      "reasoning_content": "The user said hello, I should respond."
-    },
-    "finish_reason": "stop"
-  }],
-  "usage": {
-    "prompt_tokens": 7558,
-    "completion_tokens": 42,
-    "total_tokens": 7600,
-    "prompt_tokens_details": { "cached_tokens": 7552 }
-  }
-}
-```
-
-### `POST /v1/messages`
-
-Anthropic Messages API compatible endpoint. Supports streaming, non-streaming, and tool calling.
-
-**Request body:**
-```json
-{
-  "model": "claude-sonnet-4-6",
-  "max_tokens": 1000,
-  "system": "You are a helpful assistant.",
-  "messages": [
-    { "role": "user", "content": "hello" }
-  ],
-  "stream": true
-}
-```
-
-**Anthropic protocol conversion (automatic):**
-
-| Concept | Anthropic Format | Conversion |
-|---------|-----------------|------------|
-| System prompt | Top-level `system` field | Auto-converted to OpenAI `system` message |
-| Message content | `content` array (text/tool_use/tool_result) | Auto-mapped to corresponding roles |
-| Tool results | `tool_result` blocks in `user` messages | Auto-converted to `role: "tool"` |
-| Tool definitions | `input_schema` | Auto-mapped to `parameters` |
-| `tool_choice` | `{type:"auto"/"any"/"tool"}` | `any`→`required`, `tool`→function object |
-| Reasoning | `thinking.budget_tokens` | Auto-mapped to `reasoning_effort` (≥10000→high, ≥5000→medium, ≥2000→low) |
-| Stop reason | `end_turn`/`max_tokens`/`tool_use` | Auto-mapped to `stop`/`length`/`tool_calls` |
-| Token usage | `input_tokens`/`output_tokens` + cache | Passed through, cache fields mapped to Anthropic format |
-
-**Streaming response (SSE, Anthropic format):**
-```
-event: message_start
-data: {"type":"message_start","message":{"id":"msg_xxx","type":"message","role":"assistant","content":[],"model":"...","usage":{"input_tokens":0,"output_tokens":0}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10,"cache_read_input_tokens":0,"input_tokens":100}}
-
-event: message_stop
-data: {"type":"message_stop"}
-```
-
-**Non-streaming response:**
-```json
-{
-  "id": "msg_xxx",
-  "type": "message",
-  "role": "assistant",
-  "model": "deepseek/deepseek-v4-flash",
-  "content": [{ "type": "text", "text": "Hello!" }],
-  "stop_reason": "end_turn",
-  "stop_sequence": null,
-  "usage": {
-    "input_tokens": 7558,
-    "output_tokens": 42,
-    "cache_read_input_tokens": 7552,
-    "cache_creation_input_tokens": null
-  }
-}
-```
-
-#### Web search (Anthropic server tool)
-
-Claude Code's WebSearch — and any Anthropic client that declares
-`{"type": "web_search_20250305", "name": "web_search"}` — relies on a **server-side** tool that
-Anthropic's API executes. Behind Command Code nothing executes it, so by default the proxy now
-**strips** Anthropic server tools (`web_search_20250305`, `web_fetch_20250910`) instead of forwarding
-them as a schema-less function tool the model cannot use.
-
-Set `CC_WEB_SEARCH=1` and the proxy serves `web_search` itself through Command Code's own
-`/alpha/web-search` endpoint — the same one the official CLI's built-in search calls, with the same
-API key:
-
-```text
-model emits web_search{query} → proxy POSTs /alpha/web-search → results are streamed back as
-server_tool_use + web_search_tool_result blocks → the call/result pair is appended to the history
-and the request is re-sent upstream → the model continues in the same message
-```
-
-- Anthropic-shaped on the wire: `server_tool_use`, `input_json_delta`, `web_search_tool_result`
-  (`web_search_result` items or `web_search_tool_result_error`), and
-  `usage.server_tool_use.web_search_requests` in the final `message_delta`. Claude Code renders it as
-  its native `Web Search(...)` / `Did N searches`.
-- `max_uses` is honoured. Once exhausted the model receives a `max_uses_exceeded` result and the tool
-  is removed from the definition for the remaining rounds (Command Code's `tool_choice` has no
-  `none`); if the model keeps calling anyway, the proxy finalizes the stream locally so
-  `message_stop` is always emitted.
-- Prior-turn `server_tool_use` / `web_search_tool_result` blocks in the history are replayed as tool
-  call / tool result messages, so multi-turn conversations keep working.
-- Results come from Command Code's search backend (DuckDuckGo). Sponsored results are filtered out;
-  `allowed_domains` / `blocked_domains` are applied on hostnames.
-- Streaming only — a non-streaming `/v1/messages` request still has server tools stripped.
-  `web_fetch_20250910` is not implemented (Claude Code's Fetch runs client-side and does not need it).
-- Each search costs one `/alpha/web-search` call plus one extra `/alpha/generate` round against your
-  Command Code quota, and goes through `CC_UPSTREAM_PROXY` when one is configured. Per-search timeout:
-  `CC_WEB_SEARCH_TIMEOUT_MS` (default `8000`).
-
-### `POST /v1/responses`
-
-OpenAI **Responses API** (what Codex and the newer OpenAI SDKs speak).
-
-The request side is translated: `input` (message array; items may omit `type`), `instructions`, `max_output_tokens`, `temperature`, `top_p`, `reasoning`, `tools` and `tool_choice` all map onto the CC envelope; the response comes back in Responses shape (`object: "response"`, `output` array, `usage`, `status`). Streaming is SSE:
-`response.created` / `response.in_progress` / `response.output_item.added|done` / `response.content_part.added|done` / `response.output_text.delta|done` / `response.reasoning_summary_text.delta|done` / `response.function_call_arguments.delta|done`, terminated by `response.completed` (`response.incomplete` when truncated by `max_output_tokens`, `response.failed` on error).
-
-- **Stateless**: `previous_response_id` is not supported and answers `400` — send the full `input` every turn (the proxy stores no conversation history).
-- Errors use the Responses shape: `{"error":{"message":...,"type":...}}`.
-- Shares the same upstream call path, cache breakpoints and idle watchdog as `/v1/chat/completions`.
-- **First-token silence and keep-alive**: `response.created` / `response.in_progress` are emitted **immediately** once upstream returns `200`, and a `: keepalive` SSE comment follows every 5 s while waiting. Time-to-first-token for a reasoning model with a large prompt measured 15–40 s; that silent window used to put **zero bytes** on the wire, so intermediate layers (EdgeOne's origin idle timeout measured ~15 s) or client first-byte timeouts cut the connection — visible as nginx `499` with `body_bytes_sent=0` and a client retrying every 15 s. SSE comments must be ignored by clients per spec (`/v1/messages` uses `event: ping`, but Responses has no ping event and an unknown event type risks strict-parser errors).
-
-```bash
-curl http://127.0.0.1:3050/v1/responses \
-  -H "Authorization: Bearer user_xxxxxxxxx" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}'
-```
-
-### `GET /v1/models`
-
-Returns available model list. Fetched dynamically from Provider API (5 min cache), falls back to hardcoded list on failure.
-
-### `GET /health`
-
-Health check. Returns `OK`.
-
-## Error Codes
-
-Produced by the proxy itself:
-
-| HTTP | When |
-|------|------|
-| `400` | Body is not valid JSON, `input` is empty, or an unsupported `previous_response_id` is used |
-| `401` | API key missing / malformed (must start with `user_`; sent via `Authorization: Bearer` or `x-api-key`) |
-| `404` | Unknown path |
-| `413` | Body exceeds `CC_MAX_BODY_MB` (connection kept alive and drained, not reset) |
-| `429` | Zero output tokens (non-streaming only; streaming reports 200 + `response.failed`, see "Zero-Output Guard"), stream idle timeout (180s streaming / 90s non-streaming), or an upstream rate-limit mapping — all carry `Retry-After` so SDKs back off; after 3 consecutive timeouts **for the same session** a "reduce context" hint is returned |
-| `502` | CC upstream error (connection-level failures such as `fetch failed` also land here) |
-| `503` | `CC_MAX_INFLIGHT` is set and the in-flight cap is exceeded (`type: server_busy`) |
-
-Upstream CC status mapping (`CC_STATUS_MAP`; anything unlisted becomes `502 upstream_error`):
-
-| Upstream | Downstream |
-|----------|------------|
-| `400` → `400 invalid_request_error` | `401` → `401 authentication_error` |
-| `402` → `429 rate_limit_error` (payment failures are treated as rate limits) | `403` → `401 authentication_error` |
-| `404` → `404 not_found` | `422` → `400 invalid_request_error` |
-| `429` → `429 rate_limit_error` (with `retry_after: 30`) | `500` / `502` → `502 upstream_error` |
-| `503` → `503 temporarily_unavailable` | anything else → `502 upstream_error` |
-
-The machine-readable classification from the upstream error body (`error.code`, e.g. `BAD_REQUEST` / `USAGE_EXCEEDED`) is passed through as `error.code`.
-
-CC reports failures inside the response stream rather than always using an HTTP status: `{"type":"error","error":{...,"statusCode":N,"isRetryable":B}}`. The proxy takes that status (a leading `<NNN>` in the message wins over it, matching the CLI) and maps it the same way as an HTTP-level error; for example, an upstream-declared 400 / 429 reaches the client with its own status instead of being collapsed into a blanket 502.
-
-## Model List
-
-The proxy returns a live model list via `GET /v1/models`. Below are common models for reference; the actual list depends on the live API response — see [Command Code Pricing](https://commandcode.ai/docs/resources/pricing-limits) for plan details.
-
-### Common Models
-
-| Model ID | Provider |
-|----------|----------|
-| `claude-sonnet-4-6` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-haiku-4-5-20251001` | Anthropic |
-| `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini` / `gpt-5.3-codex` | OpenAI |
-| `deepseek/deepseek-v4-pro` / `deepseek/deepseek-v4-flash` | DeepSeek |
-| `moonshotai/Kimi-K2.6` / `moonshotai/Kimi-K2.5` | Kimi |
-| `zai-org/GLM-5.1` / `zai-org/GLM-5` | GLM |
-| `MiniMaxAI/MiniMax-M3` / `MiniMaxAI/MiniMax-M2.7` / `MiniMaxAI/MiniMax-M2.5` | MiniMax |
-| `Qwen/Qwen3.7-Max` / `Qwen/Qwen3.6-Max-Preview` / `Qwen/Qwen3.6-Plus` | Qwen |
-| `stepfun/Step-3.7-Flash` / `stepfun/Step-3.5-Flash` | Step |
-| `xiaomi/mimo-v2.5-pro` / `xiaomi/mimo-v2.5` | Xiaomi (**image input supported**) |
-| `google/gemini-3.5-flash` / `google/gemini-3.1-flash-lite` | Gemini |
-
-> ⚠️ Some models (e.g. `deepseek-v4-flash`, `claude-sonnet-4-6`) do not support image input. Use `xiaomi/mimo-v2.5`, `Kimi-K2.5`, or other vision models for multimodal.
-
-## Integration Examples
-
-### Python (OpenAI SDK)
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="user_xxxxxxxxx",
-    base_url="http://127.0.0.1:3050/v1",
-)
-
-response = client.chat.completions.create(
-    model="deepseek/deepseek-v4-flash",
-    messages=[{"role": "user", "content": "hello"}],
-    stream=True,
-)
-for chunk in response:
-    print(chunk.choices[0].delta.content or "", end="")
-```
-
-### cURL
 ```bash
 curl http://127.0.0.1:3050/v1/chat/completions \
-  -H "Authorization: Bearer user_xxxxxxxxx" \
+  -H "Authorization: Bearer ccp_your_token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek/deepseek-v4-flash",
-    "messages": [{"role": "user", "content": "hello"}],
+    "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
 ```
 
-### Cursor
-Add a Custom Provider in Cursor settings:
-- **API Base URL**: `http://127.0.0.1:3050/v1`
-- **API Key**: `user_xxxxxxxxx`
-- **Model**: Choose from the model list
+### 2. Cursor / NextChat / Common AI Clients
 
-### Anthropic (Python SDK)
+- **API Base URL**: `http://<server-ip>:3050/v1`
+- **API Key**: `ccp_your_token`
+- **Model**: Any supported model ID (e.g. `deepseek/deepseek-v4-flash`, `claude-sonnet-4-6`, `gpt-5.5`)
+
+### 3. Claude Code / OpenCode
+
+For Anthropic Messages API:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:3050"
+export ANTHROPIC_API_KEY="ccp_your_token"
+```
+
+### 4. Python SDK (OpenAI)
+
 ```python
-import anthropic
+from openai import OpenAI
 
-client = anthropic.Anthropic(
-    api_key="user_xxxxxxxxx",
-    base_url="http://127.0.0.1:3050",
+client = OpenAI(
+    base_url="http://127.0.0.1:3050/v1",
+    api_key="ccp_your_token"
 )
-message = client.messages.create(
+
+response = client.chat.completions.create(
     model="deepseek/deepseek-v4-flash",
-    max_tokens=1000,
-    system="You are helpful.",
-    messages=[{"role": "user", "content": "hello"}],
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True
 )
-print(message.content[0].text)
+
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
 ```
-
-The Anthropic SDK authenticates via the `x-api-key` header — supported by the proxy natively (no `Authorization` header needed).
-
-### OpenCode
-```json
-{
-  "provider": "openai-compatible",
-  "baseUrl": "http://127.0.0.1:3050/v1",
-  "apiKey": "user_xxxxxxxxx"
-}
-```
-
-## Anti-Detection
-
-Aligned line-by-line against the official npm package source (`command-code@1.88.0`; `dist/cli.mjs` is minified but **not obfuscated**). Newer npm releases only raise a drift **warning** — the proxy never silently bumps the version it claims:
-
-| Mechanism | Implementation |
-|-----------|---------------|
-| **Device Fingerprint** | `POST /alpha/fingerprint/record` before first request per key; signal values (Windows MachineGuid shape, real-shaped MACs, `DESKTOP-xxxxxx` hostname) are **derived deterministically from the API key** and hashed exactly like the CLI, so one key always reports the same device — across restarts, memory reclamation and multiple instances (bulk reset via `CC_FINGERPRINT_SALT`) |
-| **Lifecycle Events** | `POST /alpha/lifecycle-events` (`cli_session_exists`, metadata `{sessionId, cliVersion, mode, os}`) sent in parallel with the fingerprint on key init, using the same `User-Agent: cli` as generate |
-| **Session ID** | Taken from the client header when present (`x-session-id` / `x-claude-code-session-id` / `session_id` / `prompt_cache_key`); otherwise **derived deterministically from the request** — `sha1(apiKey + model + system + user text up to the first non-user message)` formatted as a UUID. |
-| **Version** | `x-command-code-version` reports the **protocol version actually implemented** (currently `1.88.0`); newer npm releases only raise a drift **warning**, never a silent version bump |
-| **Ordinary-session header set** | The three headers the CLI only sends outside a plain session (present since 1.87.1) — `x-cli-surface` (acp/rpc front doors), `x-oss-primary-provider` (BYOK), `x-cmd-provider-deepseek-internal` (internal accounts) — are never sent. Same for the long-gone `x-co-flag` |
-| **Clean outgoing JSON** | Lone UTF-16 surrogate halves (a truncated emoji, produced by client-side slicing) are stripped at the single `JSON.stringify` call site via a replacer, so all three protocols are covered. Paired surrogates — every real emoji — survive untouched; `JSON.stringify` would otherwise emit `\ud83d` and a strict upstream decoder would 400 |
-| **CLI Envelope** | 9 keys: `config / memory / taste / skills / permissionMode / threadId / mode / promptCache / params` |
-| **OpenTelemetry** | `traceparent` (W3C Trace Context) |
-| **Environment** | `x-cli-environment: production`, `x-taste-learning: "false"`, `User-Agent: cli` |
-| **Project Slug** | `x-project-slug` = `slugify(DEVICE_PROFILE.projectDir)` — same source as `config.workingDir` (default `C:\Users\dev\projects\app`, override with `CC_DEVICE_PROJECT_DIR`) |
-| **Single Source of Device Truth** | Fingerprint / `config.environment` / `config.workingDir` / `x-project-slug` / lifecycle `os` all read one `DEVICE_PROFILE` (`win32` / `x64`) — so they cannot contradict each other ("fingerprint says win32, environment says linux"), and the host's real platform, Node version and cwd are never handed upstream |
-| **Reasoning Effort** | `reasoning_effort` pass-through (low/medium/high/max) |
-| **Key Validation** | Regex `user_[a-zA-Z0-9_-]+` on `Authorization: Bearer` or `x-api-key`, auto-cleans extra paths/prefixes, rejects `sk-xxx` format |
-| **Stream Timeout** | 30s streaming / 90s non-streaming → 429 with SDK auto-retry |
-| **Consecutive Timeout** | 3 consecutive timeouts before "reduce context" hint |
-| **Zero-Output Guard** | outputTokens=0 with no output item: non-streaming → 429 `rate_limit_error` (SDK auto-retry, anti false billing); streaming — where `response.created` is sent eagerly — → 200 + `response.failed` (upstream_error). Empty responses are never dressed up as success |
-| **Upstream Abort** | `AbortController` on client disconnect + all error paths |
-| **Privacy Logging** | No API key fragments, no error bodies, no stack traces in logs |
-
-## Protocol Details
-
-### CC API Request Structure
-
-```json
-{
-  "config": {
-    "workingDir": "C:\\project",
-    "date": "2026-06-07",
-    "environment": "win32",
-    "structure": [],
-    "isGitRepo": false,
-    "currentBranch": "",
-    "mainBranch": "",
-    "gitStatus": "",
-    "recentCommits": []
-  },
-  "memory": null,
-  "taste": null,
-  "skills": null,
-  "permissionMode": "standard",
-  "params": {
-    "model": "deepseek/deepseek-v4-flash",
-    "messages": [...],
-    "max_tokens": 64000,
-    "stream": true,
-    "reasoning_effort": "max"
-  }
-}
-```
-
-`config.environment` and `config.workingDir` come from `DEVICE_PROFILE` (not from the host), and `skills` is `null` (not an empty string).
-
-Conditional fields: `system` (extracted from `system` messages), `temperature`, `reasoning_effort`, `tools` (mapped to CC `input_schema` format), `tool_choice`, `parallel_tool_calls`. When a `prompt_cache_key` is present (or the client already set `cache_control`), the breakpoint lands on the last system block — caching is prefix-based and system is that prefix.
-
-### CC API Image Message Format
-
-The CLI sends images in this format:
-
-```json
-{
-  "role": "user",
-  "content": [
-    { "type": "image", "image": "data:image/jpeg;base64,..." },
-    { "type": "text", "text": "What does this image say?" }
-  ]
-}
-```
-
-The proxy receives OpenAI `image_url` format and converts it to the above CC format transparently.
-
-## Docker Deployment
-
-### Pull from GHCR
-
-Pre-built multi-arch images (`linux/amd64` + `linux/arm64`) are published to the GitHub Container Registry by GitHub Actions on every push to `v2` / `master` / `main` / `release` and on every `v*` tag.
-
-> 📌 **This document lives on the `v2` branch, hence the `:v2` tag below.** The repository is
-> maintained as separate version lines: `:latest` follows `master` / `main` / `release` (the legacy
-> line) — do not use `:latest` on v2, it would pull the old build. `docker-compose.yml` points at
-> `:v2` by default too.
-
-```bash
-cp config.json.example config.json
-docker pull ghcr.io/silentely/comm2api:latest
-docker run -d --name comm2api -p 3050:3050 -e PORT=3050 \
-  -v "$PWD/config.json:/app/config.json:ro" \
-  ghcr.io/silentely/comm2api:latest
-```
-
-The image is published on GitHub Container Registry:
-
-| Tag | Source |
-|-----|--------|
-| `:latest` | `main` branch and `v*` tags (stable) |
-| version | `v*` tags, e.g. `:v1.6.0` |
-
-```bash
-docker pull ghcr.io/silentely/comm2api:latest
-```
-
-> ℹ️ **GHCR packages are private by default**, so log in before pulling (or use `gh auth token` if `gh` is already logged in):
->
-> ```bash
-> docker login ghcr.io -u <your-github-username>
-> ```
->
-> To allow anonymous pulls, switch the package to Public under **Settings → Danger Zone → Change visibility**.
-
-After upgrading, confirm the digest actually changed (`docker inspect --format '{{index .RepoDigests 0}}'`) rather than assuming your local cache is current.
-
-### Quick Start (docker compose)
-
-The default `docker-compose.yml` pulls the prebuilt image above — no local build required:
-
-```bash
-docker compose up -d
-```
-
-The proxy will listen on `http://0.0.0.0:3050`. Set `PROXY_PORT` to customize the host port:
-
-```bash
-PROXY_PORT=13050 docker compose up -d
-```
-
-### Build from Source (local development)
-
-To build from the current source instead, use `docker-compose.local.yml` — its only difference from the default compose file is `image:` replaced by `build: .`; ports, config mount and healthcheck stay identical:
-
-```bash
-docker compose -f docker-compose.local.yml up -d --build
-```
-
-The resulting image is tagged `comm2api:local`, kept separate from the `latest` pulled from the registry so both can coexist.
-
-Or with the plain CLI:
-
-```bash
-docker build -t comm2api:latest .
-docker run -d -p 3050:3050 -e PORT=3050 comm2api:latest
-```
-
-### Multi-Architecture Build
-
-```bash
-pnpm run docker:build:multi
-```
-
-### Data directory mount (persisting panel configuration)
-
-Keys added in the panel, the admin password and model-test results all live in `/app/data`.
-**Without a volume, all of it is lost when the container is recreated:**
-
-```yaml
-volumes:
-  - ./data:/app/data
-```
-
-`docker-compose.yml` mounts it by default (Docker creates the directory if missing — unlike
-`config.json`, where a missing file becomes a same-named *directory* and breaks config loading).
-The image declares it as a `VOLUME`, so bare `docker run` needs an explicit
-`-v "$PWD/data:/app/data"`.
-
-> 💡 You can keep managing keys purely through config instead: put them in `config.json`'s `apiKey`
-> or the `CC_API_KEY` variable. They show up as **read-only** entries in the panel and need no
-> `data/` volume. Only panel edits write to `data/`.
-
-### Configuring variables (Docker)
-
-Copy the template — `cp .env.example .env` — and fill in `ADMIN_PASSWORD` etc. Compose reads the
-`.env` next to it automatically and injects it; **no compose edits needed**:
-
-```bash
-cp .env.example .env
-vim .env                      # at least set ADMIN_PASSWORD
-docker compose up -d
-```
-
-Or pass them inline:
-
-```bash
-ADMIN_PASSWORD=your-admin-password CC_API_KEY=user_xxx docker compose up -d
-```
-
-Precedence: **host environment > `.env`** (if you exported the variable, the shell wins).
-
-> `PORT` inside the container is fixed at `3050` (the orchestration and healthcheck rely on it); use
-> `PROXY_PORT` to change the published port. With `ADMIN_PASSWORD` unset the panel refuses all access
-> (it is *not* "no password required") and the startup log says so explicitly.
-
-### Environment Variables
-
-Only these are container-specific; everything else lives in the [Environment Variables](#environment-variables) table above:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3050` | Container listen port |
-| `PROXY_PORT` | `3050` | Host port (compose only) |
-| `ADMIN_PASSWORD` | unset | Admin panel password; unset ⇒ `/admin/` refuses access |
-| `CC_DATA_DIR` | `/app/data` | Runtime data dir (already set in the image; pair with a volume) |
-
-## In-flight Cap (Optional)
-
-**Off by default** (`CC_MAX_INFLIGHT` unset = no concurrency limit), so existing behaviour is unchanged.
-
-This project is a **pure proxy layer**; concurrency control belongs downstream — use your reverse proxy for per-IP / per-key limits (see the `limit_conn` block in [Memory & Deployment](#memory--deployment)). This option is **not** a replacement for that; it only covers running **without** a reverse proxy (which both the Dockerfile and `pnpm start` invite) with an in-process, **global-only** guard:
-
-```bash
-CC_MAX_INFLIGHT=32 pnpm start    # at most 32 concurrent requests
-```
-
-Over the limit it returns `503` + `Retry-After: 5` + `type: server_busy` — a shape the official OpenAI / Anthropic SDKs retry with backoff, instead of the client seeing a connection reset. `/health` and `/` are exempt so liveness probes and orchestrators never receive a 503 because business traffic is busy.
-
-**Why it exists**: memory is `in-flight × (0.13 MB + 5.5 × body_MB)`. `CC_MAX_BODY_MB` bounds only the **per-request** term; nothing bounds the multiplier — at the default 100 MB, N concurrent requests can cost N × 550 MB.
-
-> **Why the default body cap stays at 100 MB**: Field measurements recorded a legitimate multimodal session (21 base64 images, ~10.11 MiB) hitting the old 10 MB cap, so the threshold cannot be lowered without breaking real usage — which is exactly why the concurrency side has to be bounded instead. The startup warning about implied worst-case memory is advisory; `CC_MAX_INFLIGHT` is the enforcement.
-
-> ⚠️ Enabling this is **not** the same as being memory-safe: 32 × 550 MB still exceeds a small box. For a hard bound, lower `CC_MAX_BODY_MB` **as well**.
-
-## Access log (per-request outcome)
-
-Every `/v1/*` request writes one line when it finishes:
-
-```json
-{"method":"POST","path":"/v1/responses","status":200,"durationMs":33996,
- "streaming":true,"model":"deepseek/deepseek-v4.1-flash",
- "outcome":"stream_idle_timeout","bytesOut":1603}
-```
-
-**Why `status` alone is not enough**: streamed responses send their 200 headers up front, so a
-normal finish, an idle-watchdog kill and an upstream error all report 200. Without a separate
-outcome, "200 + error event + zero output" and "200 + full answer" look identical — the client
-reports a failure while the server log shows nothing wrong.
-
-`outcome` values: `ok`, `stream_idle_timeout`, `stream_incomplete`, `zero_output`,
-`upstream_error`, `client_disconnected`, `socket_closed`.
-
-`/health` and the admin plane are excluded so probes do not flood the log.
-
-## Upstream Idle Timeouts
-
-Two upstream read idle watchdogs; on expiry the proxy returns `429` (with `retry_after`) so the SDK retries automatically:
-
-| Env var | Default | Applies to |
-|---|---|---|
-| `CC_STREAM_IDLE_MS` | `180000` | Streaming requests |
-| `CC_NONSTREAM_IDLE_MS` | `90000` | Non-streaming requests |
-
-**Semantics**: they measure only the time spent waiting inside `reader.read()`, reset on every received chunk — **not the total request duration**. As long as upstream keeps emitting, the watchdog never fires, even for a request that has been running for tens of minutes.
-
-**The defaults differ from the official CLI, and that is a known trade-off**: the official CLI has **no** upstream idle timeout at all — deobfuscating `command-code@1.50.0` shows every `createApiClient({ baseUrl })` call site passes no `timeout`, and 700+ second stalls complete successfully. This proxy keeps 30 s to catch genuinely dead connections; the cost is that a reasoning model's long prefill/first-token stall can be killed.
-
-If you see `429 Response timeout` or `zero output tokens` where the log shows `elapsedMs ≈ 30000` and `bytesReceived = 0`, the watchdog killed a healthy stall — raise it:
-
-```bash
-CC_STREAM_IDLE_MS=300000 pnpm start      # 5 minutes
-```
-
-> ⚠️ A false kill costs more than one failed request: the abort returns `429 + retry_after`, the SDK retries automatically, and a retry **resends the entire context** — so each false kill re-pays the full prefill on long conversations.
-
-## Upstream Transient Retry
-
-The CC upstream sometimes kills a connection mid-stream at peak hours (peer RST/FIN), which surfaces in Node as
-`TypeError: terminated`. Before this change the proxy handed that straight to the client as
-`502 {"error":{"message":"Upstream error: terminated","type":"proxy_error"}}`.
-
-As long as **no byte has been written downstream yet**, the request never started from the client's point of view —
-so the proxy can absorb the blip internally instead of making the client eat a 502 and resend its whole context.
-
-- **Retry requires all four**: ① the upstream did not finish — either a transport-level drop (`terminated` /
-  `ECONNRESET` / `ECONNREFUSED` / `EPIPE` / `ETIMEDOUT` / `UND_ERR_SOCKET` / `socket hang up` / `other side closed` /
-  `fetch failed`), or a **clean peer FIN that carried no `finish` event at all** (the same class of truncation as an
-  RST); ② nothing written downstream yet (streaming: no header/event emitted; non-streaming: `headersSent` still
-  false); ③ the client is still connected; ④ the retry cap is not reached.
-- Once any header or event has gone downstream, the proxy **never retries** — the semantics are already committed and a
-  retry would duplicate text.
-- `STREAM_IDLE_TIMEOUT` (the `429` "reduce your context" signal) is deliberately passed through and is **never retried**.
-- If an upstream `error` event (`429` / `503` …) has already been parsed, the proxy does **not** retry, and if the
-  connection then drops it still surfaces that semantic error instead of overwriting it with a transport `502`
-  (reporting "upstream at capacity" as "the proxy broke" would be misleading).
-- A client that disconnects during the backoff abandons the retry — the client is gone, another upstream call would
-  only burn quota.
-- Retries are invisible to the client: it sees a single `200` whose body comes from the attempt that succeeded.
-
-| Env var | Default | Description |
-|---|---|---|
-| `CC_UPSTREAM_RETRY_MAX` | `2` | Max retries (3 attempts in total); `0` disables the behaviour |
-| `CC_UPSTREAM_RETRY_BASE_MS` | `400` | Backoff base in ms; the actual delay is base × attempt number |
-
-Logs to look for: `Upstream stream terminated before first byte - retrying` / `Upstream error before first byte - retrying` /
-`Upstream stream ended incomplete before first byte - retrying` (a retry happened; `attempt` / `maxAttempts` / `cause`
-or `reason` are in the structured fields), `Upstream retry recovered` (the retry **actually delivered** a normal
-response) and `Upstream retry abandoned (client disconnected during backoff)`. The startup banner's `upstreamRetry`
-field shows the effective values.
-
-```bash
-CC_UPSTREAM_RETRY_MAX=0 pnpm start        # disable retries (behaviour reverts to before this change)
-CC_UPSTREAM_RETRY_BASE_MS=800 pnpm start  # wider backoff (default 400ms)
-```
-
-> **Scope**: the retry loop covers both the streaming and non-streaming paths of `/v1/chat/completions`.
-> `/v1/messages` and `/v1/responses` have a different structure and are not covered by this change (drops are still
-> reported as before).
-
-## Output Ceilings and Credit Errors
-
-Both look like "the upstream rejected us", but they call for opposite handling.
-
-**An output ceiling is a request-side problem: never switch keys, but do refit and resend once.** The rejection states
-the real ceiling in the body:
-
-```
-400 max_tokens: 200000 > 128000, which is the maximum allowed number of output tokens for claude-sonnet-5-5
-```
-
-The proxy parses `128000` out of that comparison, records it in a process-wide `learnedOutputCeilings` map (tighten
-only, never widen), clamps `max_tokens`, and resends the same request **once**. Later requests for that model are
-clamped while the body is built, so the 400 is not paid again every turn.
-
-- Only the numeric comparison form is parsed. A message such as `Invalid input: expected number ... at max_tokens`
-  names no ceiling, so nothing is guessed — a fabricated value would be indistinguishable from the real one at the
-  point where it decides the next request's budget.
-- One downshift only. A second refusal is something else, and resending would just burn quota.
-- The catalog's published `max_output_tokens` and the learned value are combined with `min`, and then bounded by the
-  gateway-wide `200000` (measured: 200000 accepted, 200704 refused, independent of the model window).
-
-**A credit error is account-scoped: the key must rotate.** `INSUFFICIENT_CREDITS` / `USAGE_EXCEEDED` /
-`PREMIUM_CREDITS_EXHAUSTED` / `402 insufficient credits` all mean "this account is out of money" while other keys in
-the pool are perfectly usable — so they are **not** in the key-independent list, which keeps only the model-scoped
-`MODEL_NOT_IN_PLAN` / `model not in plan`. Matching normalises case and underscores/spaces, because the upstream JSON
-spells it `MODEL_NOT_IN_PLAN` and the prose spells it `model not in plan`.
-
-> Treating a credit error as key-independent is the most expensive misclassification in a multi-key deployment: the
-> whole pool fails because the first account is broke, when the correct handling is simply the next key.
-
-## Memory & Deployment
-
-> Measurements reproduced from [issue #20] (Node v24, loopback mock upstream).
-
-Rule of thumb for per-request memory:
-
-```
-RSS ≈ 70 MB + in-flight × (0.13 MB + 5.5 × body_MB)
-```
-
-### Streaming responses apply backpressure
-
-When `res.write()` returns `false` (the socket write buffer passed `highWaterMark`), reading from upstream pauses, so the response no longer accumulates unbounded in memory:
-
-| Scenario (200 MB upstream stream, client stops reading after sending) | Peak RSS delta |
-|---|---|
-| Before the fix | **+586 MB** (66 → 652 MB) |
-| After the fix | **+4 MB** (backpressure propagates upstream, which stalls after ~8 MB) |
-
-This is not only a hostile-client problem — throttled/mobile links, a client blocked on tool execution, or a client that already gave up but whose TCP stack has not sent RST all trigger it.
-
-### Request body is ~5.5× its size
-
-The body exists in several copies before being forwarded: `chunks[]` / `Buffer.concat` / utf8 string / `JSON.parse` object tree / `buildCcRequest` second object tree / `JSON.stringify` serialized body.
-
-| body | cap | peak delta | status |
-|---|---|---|---|
-| 7 MB | 100 MB | +52 MB (7.4×) | 200 |
-| 20 MB | 100 MB | +116 MB (5.8×) | 200 |
-| 20 MB | 8 MB | +21 MB (1.05×) | **413** |
-
-At startup a `warn` is logged when the implied worst case is ≥ 500 MB. The body limit is **per request** — cap the multiplier with `CC_MAX_INFLIGHT` (in-process, global only), and add per-IP / per-key limits in the reverse proxy. A public deployment should do both.
-
-### Suggested nginx front
-
-Rejecting in nginx means the body is never materialized in the Node process at all:
-
-```nginx
-map $http_authorization $cc_key { default $http_authorization; "" $http_x_api_key; }
-map "" $cc_global_key { default "global"; }
-
-limit_conn_zone $binary_remote_addr zone=cc_ip:10m;
-limit_conn_zone $cc_key             zone=cc_key:10m;
-limit_conn_zone $cc_global_key      zone=cc_global:10m;
-
-location /v1/ {
-    client_max_body_size 4m;   # must be <= CC_MAX_BODY_MB
-    limit_conn cc_ip     8;
-    limit_conn cc_key    4;
-    limit_conn cc_global 32;   # this *is* the memory ceiling
-    limit_conn_status 429;
-    proxy_pass http://127.0.0.1:3050;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_buffering off;
-    proxy_read_timeout 300s;   # must exceed the 30s stream idle timeout
-}
-```
-
-> ⚠️ **keep-alive ordering**: `proxy_set_header Connection ""` above keeps connections to the backend alive, so the
-> reverse proxy's `upstream { keepalive_timeout ...; }` **must be smaller than** the backend's `CC_KEEPALIVE_TIMEOUT_MS`
-> (default 65s). Get it backwards and nginx reuses a connection the backend has already FIN'd, then hits `EPIPE` while
-> writing the POST body (visible in the nginx log as `sendfile() failed (32: Broken pipe)`); POST is not idempotent and
-> nginx does not retry it by default — the client gets a bare 502.
-
-### Stalled clients (neither reading nor disconnecting)
-
-Once backpressure is in effect, a client that **neither reads nor disconnects** keeps its request and upstream connection alive indefinitely. Measured residual cost:
-
-| Stalled connections | RSS delta | Upstream connections held |
-|---|---|---|
-| 1 | +5 MB | 1 |
-| 10 | +45 MB | 10 |
-| 50 | +248 MB | 50 (**held forever**) |
-
-The cost is **bounded, does not leak, and is reclaimed as soon as the client disconnects** (the RSS curve stays flat) — but the **number of connections itself is unbounded**.
-
-This is left unhandled by default, because a stalled client is indistinguishable at the protocol level from a *legitimate* client blocked on tool execution, and the official CLI has no upstream idle timeout at all — adding an aggressive timeout would repeat the mistake of killing healthy requests.
-
-To cap it, opt in:
-
-```bash
-# only drop a client that has been blocked downstream for over 60s;
-# a client that keeps making drain progress never triggers this
-CC_CLIENT_DRAIN_TIMEOUT_MS=60000 pnpm start
-```
-
-Measured with the timeout enabled (50 stalled connections): upstream connections held goes from **50 (forever) → 0**, with **no** post-drop draining of upstream.
-
-A more robust cap still belongs at the reverse proxy (`limit_conn`), since only it knows how much concurrency a given deployment can afford.
-
-### Other notes
-
-- **`logFile` uses `appendFileSync`** — synchronous writes on the event loop. Under public load they serialize the loop; prefer leaving it empty and collecting stdout.
-- **systemd guard rails**: set `MemoryMax=` and `NODE_OPTIONS=--max-old-space-size=` so an overshoot kills the proxy, not `sshd`/`nginx`.
-- **Content-derived session id**: without a client-supplied session header the id hashes `apiKey + model + system + user text up to the first non-user message`, so anything that changes inside that prefix — a system prompt carrying today's date, a model switch — gives a different session id mid-conversation, which forces a cache rebuild. Send `x-session-id` or `prompt_cache_key` from the client when you need exact control.
-- **Multi-account + multiple instances**: the only per-process state left is `keyStateStore` (a deterministic fingerprint plus an init throttle per key). The same API key served by two instances therefore reports the **same** device fingerprint and the **same** session id — provided `CC_FINGERPRINT_SALT` and `CC_DEVICE_PROJECT_DIR` are identical on both, or the fingerprints diverge. Only the fingerprint/lifecycle pre-request timing is per-instance, so two instances may each send one init round inside the same window. When scaling out, use consistent hashing on the API key (`hash $cc_key consistent`) rather than round-robin.
-
-## Disclaimer
-
-This project is for **educational and research purposes** only.
-
-- **Unofficial**: This project is not affiliated with Command Code in any way.
-- **Personal Use**: Users assume all responsibility. Please comply with the [Command Code Terms of Service](https://commandcode.ai/tos).
-- **API Key**: This project does not collect, upload, or leak your API Key. The key is sent per request via the `Authorization: Bearer <key>` or `x-api-key` header and is never logged; an optional `apiKey` field in `config.json` serves only as a local fallback and never leaves your machine.
-- **Compliance**: The protocol is based on passive observation of local CLI network traffic. No unauthorized access, cracking, or tampering of the server has been performed.
-- **Account Risk**: Keep usage frequency consistent with normal CLI usage. Extremely high concurrent calls may trigger risk controls.
 
 ---
 
-## Development
+## 📚 Documentation Center
 
-```bash
-# Start with watch mode (auto-reload on file changes)
-pnpm run dev
+Detailed operational guides, configuration parameters, and internal architecture are modularized in the `docs/` folder:
+
+| Document | Description |
+|---|---|
+| 🚀 **[Deployment Guide](docs/deployment.md)** | Docker, Compose, GHCR images, Systemd service, production Nginx reverse proxy configuration, Keep-Alive timing, and memory tuning |
+| ⚙️ **[Configuration Reference](docs/configuration.md)** | Complete `config.json` reference, `.env` file guide, environment variables reference, outbound proxy syntax, and key binding |
+| 🔌 **[API Reference](docs/api.md)** | Chat Completions, Messages, Responses API specifications, Anthropic Web Search server tool execution, and error code mappings |
+| 📊 **[Quota & Scheduling](docs/quota.md)** | Official quota scraping mechanics, account state machine, pool rotation, and automated failover |
+| 🛡️ **[Architecture & Anti-Detection](docs/architecture.md)** | Hardware fingerprint derivation, 9-key wire protocol envelopes, pre-first-byte retry, adaptive token learning, and stream backpressure |
+| 🛠️ **[Admin API Contract](docs/admin-api.md)** | RESTful API specifications between backend and web dashboard |
+| 📐 **[Design Notes](docs/design-notes.md)** | Architectural philosophy, deliberate trade-offs, and project constraints |
+
+---
+
+## 📂 Project Structure
+
+```text
+comm2api/
+├── proxy.mjs                 # Core proxy server entry point (data plane & routing)
+├── lib/                      # Backend modules (zero external dependencies)
+│   ├── admin-api.mjs         # Admin dashboard RESTful API implementation
+│   ├── auth.mjs              # 2API Key & downstream authentication
+│   ├── outbound-proxy.mjs    # Outbound proxy pool & CONNECT tunneling
+│   ├── quota-poller.mjs      # Quota scraping & scheduling state machine
+│   └── web-search.mjs        # Anthropic server tool web search executor
+├── web/                      # Admin dashboard source (Vue 3 + Tailwind CSS)
+├── docs/                     # Modular documentation center
+│   ├── deployment.md         # Deployment guide
+│   ├── configuration.md      # Configuration reference
+│   ├── api.md                # API reference
+│   ├── architecture.md       # Architecture & anti-detection
+│   ├── quota.md              # Quota & scheduling
+│   ├── admin-api.md          # Admin API contract
+│   └── design-notes.md       # Design notes
+├── data/                     # Persistent runtime data directory (mounted volume)
+├── docker-compose.yml        # Production Docker Compose orchestration
+├── Dockerfile                # Container build specification
+└── package.json              # Project scripts & dev dependencies
 ```
 
-## License
+---
 
-MIT License — see [LICENSE](LICENSE).
+## ⚠️ Disclaimer
 
-- **Project name**: `comm2api`; the image is published at `ghcr.io/silentely/comm2api`.
-- **Unofficial**: this project is not affiliated with Command Code.
+This project is strictly for **educational and research purposes**.
+
+- **Unofficial**: This project is not affiliated with, endorsed by, or sponsored by Command Code.
+- **Compliance**: Users are solely responsible for adhering to applicable terms of service and regulations.
+
+---
+
+## 📄 License
+
+Distributed under the [MIT License](LICENSE).
