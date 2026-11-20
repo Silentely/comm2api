@@ -428,3 +428,89 @@ test('真实结构：用量汇总的 totalTokensIn/Out 与总花费都能读到'
   assert.equal(u.total.costUsd, 3.743224526);
   assert.equal(u.period.endMs, null, 'usage 只给了 periodStart，没有结束时间');
 });
+
+test('预热：warmupOne 与 warmupAll 能够正确调用执行器并记录运行期状态', async () => {
+  const calls = [];
+  let clock = 1_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A, KEY_B]),
+    request: async () => ({ ok: true, status: 200, json: { data: {} } }),
+    warmup: async (keyId, opts) => {
+      calls.push({ keyId, ...opts });
+      if (keyId === 'b') throw new Error('warmup failed for B');
+      return { ok: true, model: 'claude-haiku-4-5-20251001' };
+    },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true }),
+  });
+
+  // 测试单账号成功
+  const resA = await svc.warmupOne('a', { reason: 'manual' });
+  assert.equal(resA.ok, true);
+  assert.equal(resA.model, 'claude-haiku-4-5-20251001');
+  const viewA = svc.list().find(x => x.keyId === 'a');
+  assert.equal(viewA.runtime.lastWarmedAt, new Date(clock).toISOString());
+  assert.equal(viewA.runtime.lastWarmupError, null);
+
+  // 测试单账号失败
+  const resB = await svc.warmupOne('b', { reason: 'manual' });
+  assert.equal(resB.ok, false);
+  assert.match(resB.error, /warmup failed for B/);
+  const viewB = svc.list().find(x => x.keyId === 'b');
+  assert.equal(viewB.runtime.lastWarmupError, 'warmup failed for B');
+
+  // 测试全量 warmupAll
+  const allRes = await svc.warmupAll({ reason: 'all_test' });
+  assert.equal(allRes.length, 2);
+  assert.equal(allRes[0].ok, true);
+  assert.equal(allRes[1].ok, false);
+});
+
+test('自动预热：到达 5 小时窗口 resetAtMs 后自动触发预热开窗', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({
+      ok: true, status: 200,
+      json: {
+        data: {
+          windowLimits: {
+            fiveHour: { used: 10, cap: 100, resetAt: (clock + 5000) / 1000 }
+          }
+        }
+      }
+    }),
+    warmup: async (keyId, opts) => {
+      warmups.push({ keyId, t: clock, ...opts });
+      return { ok: true, model: 'claude-haiku' };
+    },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true }),
+  });
+
+  // 先拉一次额度建立快照（resetAtMs = clock + 5000）
+  await svc.refreshOne('a');
+  assert.equal(warmups.length, 0);
+
+  // 还没到 resetAtMs
+  svc.checkRecoveries();
+  assert.equal(warmups.length, 0);
+
+  // 跨过 resetAtMs 时触发 checkRecoveries
+  clock += 6000;
+  svc.checkRecoveries();
+  // 等待 microtask
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1);
+  assert.equal(warmups[0].keyId, 'a');
+  assert.equal(warmups[0].reason, 'auto_reset');
+
+  // 防重复：30 分钟内不会再次预热
+  clock += 1000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1, '30分钟内防重复生效');
+});

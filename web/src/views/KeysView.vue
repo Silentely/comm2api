@@ -370,6 +370,24 @@ function quotaFetchedText(k) {
   return fmtDateTime(q.fetchedAt)
 }
 
+async function warmupQuota(k) {
+  const targetId = k ? k.id : ''
+  busy.quotaId = 'warmup_' + (targetId || 'all')
+  try {
+    const res = await api('POST', '/quota/warmup', targetId ? { id: targetId } : {})
+    const results = res.data?.results || []
+    const failed = results.filter(r => !r.ok && !r.skipped).length
+    if (failed && failed === results.length) toast.error(res.message || '预热失败')
+    else if (failed) toast.warning(res.message || `部分账号预热失败（${failed} 个）`)
+    else toast.success(res.message || '预热成功')
+    await loadKeys(true)
+  } catch (e) {
+    toast.error('预热失败：' + e.message)
+  } finally {
+    busy.quotaId = ''
+  }
+}
+
 async function refreshQuota(k) {
   const targetId = k ? k.id : ''
   busy.quotaId = targetId || 'all'
@@ -407,6 +425,10 @@ onUnmounted(() => {
       <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" @click="refreshQuota(null)">
         <span v-if="busy.quotaId === 'all'" class="loading"></span>
         {{ busy.quotaId === 'all' ? '查询官方额度…' : '📊 刷新全部额度' }}
+      </button>
+      <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" title="给全部启用的账号发送极小请求激活 5 小时窗口" @click="warmupQuota(null)">
+        <span v-if="busy.quotaId === 'warmup_all'" class="loading"></span>
+        {{ busy.quotaId === 'warmup_all' ? '预热中…' : '🔥 预热全部' }}
       </button>
     </h2>
 
@@ -593,16 +615,35 @@ onUnmounted(() => {
                 </div>
                 <div v-else class="text-dim">-</div>
                 <div class="text-dim" style="font-size: 11px">{{ quotaFetchedText(k) }}</div>
-                <button
-                  class="btn btn-sm"
-                  type="button"
-                  style="margin-top: 6px; width: 100%"
-                  :disabled="!!busy.quotaId"
-                  @click="refreshQuota(k)"
-                >
-                  <span v-if="busy.quotaId === k.id" class="loading"></span>
-                  {{ busy.quotaId === k.id ? '查询中…' : '📊 刷新' }}
-                </button>
+                <div v-if="k.quota?.runtime?.lastWarmedAt" class="text-dim" style="font-size: 11px">
+                  🔥 预热于 {{ fmtDateTime(k.quota.runtime.lastWarmedAt) }}
+                </div>
+                <div v-if="k.quota?.runtime?.lastWarmupError" class="text-warn" style="font-size: 11px">
+                  ⚠️ 预热失败: {{ k.quota.runtime.lastWarmupError }}
+                </div>
+                <div style="display: flex; gap: 4px; margin-top: 6px">
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    style="flex: 1"
+                    :disabled="!!busy.quotaId"
+                    @click="refreshQuota(k)"
+                  >
+                    <span v-if="busy.quotaId === k.id" class="loading"></span>
+                    {{ busy.quotaId === k.id ? '查询…' : '📊 刷新' }}
+                  </button>
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    style="flex: 1"
+                    :disabled="!!busy.quotaId"
+                    title="发送极小请求激活 5 小时开窗"
+                    @click="warmupQuota(k)"
+                  >
+                    <span v-if="busy.quotaId === 'warmup_' + k.id" class="loading"></span>
+                    {{ busy.quotaId === 'warmup_' + k.id ? '预热…' : '🔥 预热' }}
+                  </button>
+                </div>
               </td>
               <td>
                 <CategoryBadge :category="healthCategory(k)" :message="healthMessage(k)" />

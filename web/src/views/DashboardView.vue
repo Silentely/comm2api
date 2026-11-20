@@ -554,10 +554,11 @@ onUnmounted(() => {
             <div class="hint" style="margin-bottom: 6px"><strong>最近事件</strong>（额度耗尽 / 恢复 / 自动切号）</div>
             <div v-for="(ev, i) in quota.events.slice(0, 5)" :key="i" class="mono" style="font-size: 11px; margin-bottom: 2px">
               <span class="text-dim">{{ fmtDateTime(ev.at) }}</span>
-              · {{ ev.type === 'quota_exhausted' ? '额度耗尽' : ev.type === 'quota_recovered' ? '额度恢复' : ev.type === 'account_switched' ? '自动切号' : ev.type }}
+              · {{ ev.type === 'quota_exhausted' ? '额度耗尽' : ev.type === 'quota_recovered' ? '额度恢复' : ev.type === 'window_warmed' ? '窗口预热' : ev.type === 'account_switched' ? '自动切号' : ev.type }}
               <template v-if="ev.keyId"> · {{ ev.keyId }}</template>
               <template v-if="ev.from"> · {{ ev.from }} → {{ ev.to }}</template>
               <template v-if="ev.reason"> · {{ ev.reason }}</template>
+              <template v-if="ev.detail"> · {{ ev.detail }}</template>
             </div>
           </div>
 

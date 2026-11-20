@@ -1834,3 +1834,22 @@ test('proxies / proxyFile 走配置分层：可热改、可落盘、非法地址
     assert.ok(pool.some(t => t.address === 'http://127.0.0.1:7891' && t.pool === true));
   } finally { await proxy.kill(); await upstream.close(); rmSync(workdir, { recursive: true, force: true }); }
 });
+
+test('后台接口：/quota/warmup 触发预热且 /quota 返回 autoWarmup 策略', async () => {
+  const s = await setup({ env: BASE_ENV });
+  try {
+    const api = await authed(s.proxy);
+    // 检查 policy 包含 autoWarmup
+    const qRes = await api.get('/quota');
+    assert.equal(qRes.status, 200);
+    const qData = (await qRes.json()).data;
+    assert.equal(typeof qData.policy.autoWarmup, 'boolean');
+    assert.equal(qData.policy.autoWarmup, true);
+
+    // 触发预热（无上游账号或无可用 Key 时返回 200 并给出结果统计）
+    const wRes = await api.post('/quota/warmup', {});
+    assert.equal(wRes.status, 200);
+    const wData = (await wRes.json()).data;
+    assert.ok(Array.isArray(wData.results));
+  } finally { await s.close(); }
+});

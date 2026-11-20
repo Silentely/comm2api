@@ -28,6 +28,23 @@ async function loadQuota(silent = false) {
   }
 }
 
+async function warmupQuota(keyId) {
+  quotaBusy.value = 'warmup_' + (keyId || 'all')
+  try {
+    const res = await api('POST', '/quota/warmup', keyId ? { id: keyId } : {})
+    const results = res.data?.results || []
+    const failed = results.filter(r => !r.ok && !r.skipped).length
+    if (failed && failed === results.length) toast.error(res.message || '预热失败')
+    else if (failed) toast.warning(res.message || `部分账号预热失败（${failed} 个）`)
+    else toast.success(res.message || '预热完成')
+    await loadQuota(true)
+  } catch (e) {
+    toast.error('预热失败：' + e.message)
+  } finally {
+    quotaBusy.value = ''
+  }
+}
+
 async function refreshQuota(keyId) {
   quotaBusy.value = keyId || 'all'
   try {
@@ -348,6 +365,17 @@ onMounted(() => {
           <span v-if="quotaBusy === 'all'" class="loading"></span>
           {{ quotaBusy === 'all' ? '刷新中…' : '🔄 刷新全部额度' }}
         </button>
+        <button
+          class="btn btn-sm"
+          style="margin-left: 8px"
+          type="button"
+          :disabled="!!quotaBusy || quotaLoading"
+          title="给全部启用的上游账号发送极小请求激活 5 小时窗口"
+          @click="warmupQuota(null)"
+        >
+          <span v-if="quotaBusy === 'warmup_all'" class="loading"></span>
+          {{ quotaBusy === 'warmup_all' ? '预热中…' : '🔥 预热全部开窗' }}
+        </button>
       </div>
       <div class="section-body">
         <div v-if="!quota" class="hint">{{ quotaLoading ? '加载中…' : '尚未采集到官方额度' }}</div>
@@ -376,6 +404,17 @@ onMounted(() => {
               >
                 <span v-if="quotaBusy === acc.keyId" class="loading"></span>
                 {{ quotaBusy === acc.keyId ? '刷新中…' : '📊 刷新' }}
+              </button>
+              <button
+                class="btn btn-sm"
+                type="button"
+                style="margin-left: 6px"
+                :disabled="!!quotaBusy"
+                title="发送极小请求激活该账号的 5 小时窗口"
+                @click="warmupQuota(acc.keyId)"
+              >
+                <span v-if="quotaBusy === 'warmup_' + acc.keyId" class="loading"></span>
+                {{ quotaBusy === 'warmup_' + acc.keyId ? '预热中…' : '🔥 预热' }}
               </button>
             </div>
 
@@ -415,6 +454,12 @@ onMounted(() => {
               <br />
               上次成功采集：{{ acc.fetchedAt ? fmtDateTime(acc.fetchedAt) : '从未' }}
               <span v-if="acc.stale" class="text-warn"> · 数据已过期，不是实时值</span>
+              <template v-if="acc.runtime && acc.runtime.lastWarmedAt">
+                · 🔥 上次预热：{{ fmtDateTime(acc.runtime.lastWarmedAt) }}
+              </template>
+              <template v-if="acc.runtime && acc.runtime.lastWarmupError">
+                · <span class="text-warn">⚠️ 预热失败：{{ acc.runtime.lastWarmupError }}</span>
+              </template>
               <template v-if="acc.partial && acc.partial.length">
                 · 部分接口失败：{{ acc.partial.join(' / ') }}
               </template>

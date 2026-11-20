@@ -111,6 +111,7 @@ const quotaService = createQuotaService({
     if (!entry) return { available: false, reason: '账号不存在' };
     return proxyPool.proxyStatusFor(entry.key);
   },
+  warmup: (keyId, opts) => warmupKey(keyId, opts),
   log: (...args) => log(...args),
   config: () => CFG,
   onEvent: (evt) => handleQuotaEvent(evt),
@@ -822,7 +823,7 @@ setInterval(() => {
 const INIT_REFRESH_MS = 8 * 60 * 60 * 1000;    // 8h
 const INIT_JITTER_MS  = 2 * 60 * 60 * 1000;    // 2h 抖动
 
-async function ensureInitialized(apiKey, signal) {
+async function ensureInitialized(apiKey, signal, route = undefined) {
   const state = getOrCreateKeyState(apiKey);
   const now = Date.now();
   if (now < state.nextInitAt) return;
@@ -847,14 +848,18 @@ async function ensureInitialized(apiKey, signal) {
     // 出口 IP 现身（指纹在这个 IP 注册、生成从那个 IP 发出），比不配代理更可疑。
     // 严格绑定不可用时抛错 —— 这里载住并直接放弃这轮预请求（而不是改走直连）。
     let initProxy;
-    try {
-      initProxy = proxyAddressFor(apiKey);
-    } catch (e) {
-      if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
-        log('warn', '严格绑定的代理不可用，跳过指纹/生命周期预请求', { reason: e.message });
-        return;
+    if (route !== undefined) {
+      initProxy = route;
+    } else {
+      try {
+        initProxy = proxyAddressFor(apiKey);
+      } catch (e) {
+        if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
+          log('warn', '严格绑定的代理不可用，跳过指纹/生命周期预请求', { reason: e.message });
+          return;
+        }
+        throw e;
       }
-      throw e;
     }
 
     await Promise.all([
@@ -1261,6 +1266,109 @@ async function probeModelInner({ key, model, message, mode = 'single' }) {
 }
 
 // 批量模型测试任务（受限并发 + 可取消），进度由后台轮询
+function pickWarmupModel() {
+  const enabled = modelState.filterEnabled(catalog.list());
+  const preferred = enabled.find(m => /haiku|flash/i.test(m.id))
+    || enabled.find(m => /claude/i.test(m.id))
+    || enabled[0];
+  return preferred?.id || fallbackModel('claude-sonnet-4-6');
+}
+
+const WARMUP_TIMEOUT_MS = 30 * 1000;
+
+async function warmupKey(keyId, { reason = 'manual' } = {}) {
+  const entry = keyPool.findById(keyId);
+  if (!entry) throw new Error('账号不存在');
+  if (entry.enabled === false) throw new Error('账号已禁用');
+
+  const model = pickWarmupModel();
+  const prompt = 'hi';
+  let ccBody;
+  try {
+    ccBody = buildCcRequest({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 16,
+      stream: true,
+    });
+  } catch (e) {
+    throw new Error(`构造预热请求失败: ${e.message}`);
+  }
+
+  let warmupProxy;
+  try {
+    warmupProxy = proxyAddressFor(entry.key);
+  } catch (e) {
+    if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
+      throw new Error(`出站代理不可用: ${e.message}`);
+    }
+    throw e;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
+  timer.unref?.();
+
+  try {
+    await ensureInitialized(entry.key, controller.signal, warmupProxy);
+
+    const response = await forwardToCC(ccBody, entry.key, {}, controller.signal, null, warmupProxy);
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      if (response.status === 401) {
+        quotaService.markAuthInvalid(keyId, '预热鉴权失败 (401)');
+      } else if (response.status === 429) {
+        quotaService.markRateLimited(keyId, '预热触发限流 (429)');
+      }
+      try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
+      throw new Error(`上游响应异常 (HTTP ${response.status}): ${summarizeUpstreamError(body, 200) || response.statusText}`);
+    }
+
+    const { text, streamError, sawFinish, usage } = await consumeProbeStream(response, {
+      maxChars: 50,
+      timeoutMs: WARMUP_TIMEOUT_MS,
+    });
+    if (streamError) {
+      try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
+      throw new Error(`预热流异常: ${summarizeUpstreamError(String(streamError), 200)}`);
+    }
+    if (!sawFinish && !text) {
+      try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
+      throw new Error('预热请求未收到有效响应（上游 200 但流为空）');
+    }
+
+    try {
+      keyPool.recordRequest(entry.key, { ok: true });
+      if (usage) {
+        const { cacheRead, cacheWrite } = splitInputTokens(usage);
+        keyPool.recordTokens(entry.key, {
+          tokensIn: Number(usage.inputTokens) || 0,
+          tokensOut: Number(usage.outputTokens) || 0,
+          cacheRead,
+          cacheWrite,
+        });
+      }
+    } catch {}
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
+      throw new Error(`预热请求超时（${WARMUP_TIMEOUT_MS / 1000}s）`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const refresh = () => quotaService.refreshOne(keyId, { reason: 'post-warmup', force: true }).catch(() => {});
+  if (reason === 'manual') {
+    await refresh();
+  } else {
+    setTimeout(refresh, 2000).unref?.();
+  }
+
+  return { ok: true, model };
+}
+
 const modelTestRunner = createModelTestRunner({
   log: (...args) => log(...args),
   probe: async ({ model, keyId, message }) => {

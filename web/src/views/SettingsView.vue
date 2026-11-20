@@ -25,6 +25,7 @@ const form = reactive({
   quotaRefreshSec: 300,
   quotaUnknownBlock: false,
   quotaForecast: true,
+  quotaAutoWarmup: true,
   accountMaxConcurrency: 0,
   crossAccountRetry: true,
   sessionAffinity: true,
@@ -83,6 +84,7 @@ function applyConfig(cfg) {
   form.quotaRefreshSec = Math.round((q.refreshIntervalMs ?? 300000) / 1000)
   form.quotaUnknownBlock = !!q.unknownBlock
   form.quotaForecast = q.forecast !== false
+  form.quotaAutoWarmup = q.autoWarmup !== false
   const sch = cfg.scheduling || {}
   form.accountMaxConcurrency = sch.accountMaxConcurrency ?? 0
   form.crossAccountRetry = sch.crossAccountRetry !== false
@@ -135,6 +137,7 @@ async function saveConfig() {
     payload.quotaRefreshIntervalMs = Math.round(Number(form.quotaRefreshSec) * 1000)
     payload.quotaUnknownBlock = !!form.quotaUnknownBlock
     payload.quotaForecast = !!form.quotaForecast
+    payload.quotaAutoWarmup = !!form.quotaAutoWarmup
     payload.accountMaxConcurrency = Number(form.accountMaxConcurrency)
     payload.crossAccountRetry = !!form.crossAccountRetry
     payload.sessionAffinity = !!form.sessionAffinity
@@ -371,6 +374,16 @@ onMounted(() => {
 
         <div class="form-row" style="margin-bottom: 6px">
           <div class="field">
+            <label>5小时窗口预热开窗</label>
+            <label class="inline-flex" style="cursor: pointer">
+              <span class="switch">
+                <input v-model="form.quotaAutoWarmup" type="checkbox" />
+                <span class="slider"></span>
+              </span>
+              <span style="font-size: 12.5px">{{ form.quotaAutoWarmup ? '已开启' : '已关闭' }}</span>
+            </label>
+          </div>
+          <div class="field">
             <label>跨账号重试</label>
             <label class="inline-flex" style="cursor: pointer">
               <span class="switch">
@@ -386,6 +399,7 @@ onMounted(() => {
           </div>
         </div>
         <div class="hint" style="margin-top: 0">
+          5小时窗口预热：窗口到期重置后自动发送极小请求激活下一轮 5 小时计时。<br />
           跨账号重试只在「下游尚未收到任何内容」时生效；已输出 SSE / 工具调用后绝不重放。
         </div>
       </div>
