@@ -100,7 +100,7 @@
 ## 6. 协议保真（wire fidelity）
 
 协议约定的唯一来源是官方 npm 包 `command-code` 的 `dist/cli.mjs`（压缩但未混淆）。
-当前对齐版本是 **1.88.0**，写在 `proxy.mjs` 的 `CC_PROTOCOL_VERSION` 里，
+当前对齐版本是 **1.91.1**，写在 `proxy.mjs` 的 `CC_PROTOCOL_VERSION` 里，
 **报的是「已实现的协议版本」而不是「npm 上的最新版本」** —— npm 上更新只打漂移告警。
 理由：真机发出去的永远是「形状 + 版本号」自洽的组合；版本号跟着 npm 跑而形状没变，
 等于自称最新版却说旧方言，比版本号过期更容易被行为分析挑出来。
@@ -131,15 +131,15 @@
   请求里无从区分）。学到的值进 `learnedOutputCeilings`（进程级、只收紧），
   与目录公布的 `max_output_tokens`、网关硬上限 200000 一起在 `buildCcRequest` 里取小。
 
-### 6.1 后续跟进（1.88.0，纯请求头同步）
+### 6.1 后续跟进（1.91.1，协议比对与版本对齐）
 
-1.88.0 的比对结论是**运行时契约零变化**：端点集合 25 个双向零增零减；透传的六个自定义头
-出现次数逐个相同；`toWireMessages` / `toWireTools` / `toWireSystem` / `toWireToolOutput` /
-`toWirePermissionMode` / `toWireThreadId` / `consumedStopReason` 逐字相同；`consumeStream`
-只有标识符改名（抹掉标识符后逐字相同，事件词汇表零变化）；指纹盐仍是
-`command-code:device-fingerprint:v1`（只是压缩后的变量名换了）。因此这次只改了
-`CC_PROTOCOL_VERSION`，没有任何形状调整 —— **版本号只随「确实实现的协议」前进**，
-不因为 npm 上出现了新版本就跟着报。
+1.88.0 → 1.91.1 复核比对结论是**wire 协议契约零变化**：
+- 端点集合 25 个双向零增零减（`/alpha/generate`、`/provider/v1/models` 等）；
+- `toWireMessages` / `toWireTools` / `toWireSystem` / `toWireToolOutput` 逐字相同；
+- `consumeStream` 事件词汇表（`text-delta`、`tool-call`、`reasoning-delta`、`usage`、`cache-write-tokens` 等）完全一致；
+- 设备指纹算法与 Salt 仍是 `command-code:device-fingerprint:v1`，字段集合不变；
+- 官方改动主要在 CLI 终端与功能交互（子 Agent 后台交互 ctrl+b、GTA VI 彩蛋与主题、`/goal` 跨 turn 持续执行），且清理了未公开内部头；默认模型调整为 DeepSeek V4.1 Flash。
+因此本代理将 `CC_PROTOCOL_VERSION` 推进到 **1.91.1**，消除版本漂移告警。
 
 ### 6.2 从同类实现移植的两处（与协议版本无关）
 

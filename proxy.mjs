@@ -357,7 +357,7 @@ function selectAccountForRequest(auth, { headers = {}, promptCacheKey = null, re
   };
 }
 
-// ── 设备指纹（形态与哈希逐字对齐官方 CLI；1.53.1 对齐，1.88.0 复核未变） ──
+// ── 设备指纹（形态与哈希逐字对齐官方 CLI；1.53.1 对齐，1.91.1 复核未变） ──
 // CPU 型号与核数对应表（仅 Windows x64）。
 // ⚠️ 上网的 components.cpuCount 必须是 **threads** 而不是 cores ——
 // CLI 的 gatherRawSignals 取的是 `os.cpus().length`，即**逻辑处理器数**。
@@ -503,7 +503,7 @@ function generateFingerprint(apiKey) {
   };
 }
 
-// 本代理**实际实现**的 wire 协议版本（对齐 command-code@1.88.0 源码）。
+// 本代理**实际实现**的 wire 协议版本（对齐 command-code@1.91.1 源码）。
 // 真机发的永远是「形状 + 版本号」自洽的组合；如果版本号跟着 npm 走而形状没变，
 // 就变成「自称最新版、却说旧方言」—— 这比版本号过期更容易被行为分析挑出来。
 // 因此这里报的是协议版本，npm 上更新了只告警、不自动改。
@@ -531,7 +531,13 @@ function generateFingerprint(apiKey) {
 //     buildMachineFingerprint / hashSignal 的算法与字段集合不变。
 // 唯一变化是内置模型注册表里若干行增加了 hidden 标记 —— 那是模型目录内容，
 // 而且本项目本来就从 /provider/v1/models 动态拉取，不依赖内置表。
-const CC_PROTOCOL_VERSION = '1.88.0';
+// 1.88.0 → 1.91.1 复核（同法比对官方 command-code@1.91.1 源码，结论：协议契约零变化）：
+//   · 端点集合 25 个双向零增零减，/alpha/generate /provider/v1/models 完全一致；
+//   · toWireMessages / toWireTools / toWireSystem / toWireToolOutput 逐字相同；
+//   · stream 事件集（text-delta/tool-call/reasoning-delta/usage/cache-write-tokens 等）完全一致；
+//   · 设备指纹算法与 Salt 仍是 'command-code:device-fingerprint:v1'，字段集合不变；
+//   · 官方改动集中在 CLI 前端与交互（子 Agent 后台、GTA 主题、/goal 自动推进等），清理了未公开内部头。
+const CC_PROTOCOL_VERSION = '1.91.1';
 let CC_VERSION = CC_PROTOCOL_VERSION;
 const CC_VERSION_REFRESH_MS = 24 * 60 * 60 * 1000; // 24h — 检查一次是否发生漂移
 
@@ -6373,6 +6379,23 @@ server.listen(CFG.port, CFG.host, () => {
   });
   if (CLIENT_DRAIN_TIMEOUT_MS > 0) {
     log('info', 'Client drain timeout enabled', { timeoutMs: CLIENT_DRAIN_TIMEOUT_MS });
+  }
+  const storageStatus = getStorageStatus();
+  if (storageStatus.mode === 'redis') {
+    const r = storageStatus.redis;
+    if (r.connected) {
+      log('info', 'Redis 持久化存储已连接并就绪', {
+        url: r.url,
+        hashKey: r.hashKey,
+        keysHydrated: r.keysCount,
+      });
+    } else {
+      log('warn', 'Redis 持久化存储未连接（当前降级为本地存储运行）', {
+        url: r.url,
+        hashKey: r.hashKey,
+        error: r.lastError || '未连接',
+      });
+    }
   }
   // 内存提示：body 上限隐含的最坏内存 = 上限 × 实测放大系数（见 MAX_BODY_SIZE 注释 / issue #20）
   const bodyCapMB = Math.round(MAX_BODY_SIZE / 1048576);

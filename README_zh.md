@@ -20,7 +20,7 @@
 
 `comm2api` 是一个 Node.js 单进程服务，**后端零运行时依赖**。它把 Command Code 上游接口转换为标准的 **OpenAI Chat Completions**、**Anthropic Messages** 与 **OpenAI Responses API** 格式，并自带复古野兽派 Web 管理后台与官方额度感知调度能力。
 
-已针对官方 CLI 源码（`command-code@1.88.0`）进行 1:1 协议逆向与反检测对齐。
+已针对官方 CLI 源码（`command-code@1.91.1`）进行 1:1 协议逆向与反检测对齐。
 
 ---
 

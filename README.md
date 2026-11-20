@@ -20,7 +20,7 @@
 
 `comm2api` is a single-process Node.js service with **zero runtime dependencies**. It bridges Command Code upstream APIs into standard **OpenAI Chat Completions**, **Anthropic Messages**, and **OpenAI Responses API** formats, featuring a retro-brutalist Web admin dashboard and official quota-aware scheduling.
 
-Rigorously reverse-engineered and aligned 1:1 with the official CLI source code (`command-code@1.88.0`).
+Rigorously reverse-engineered and aligned 1:1 with the official CLI source code (`command-code@1.91.1`).
 
 ---
 
