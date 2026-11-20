@@ -6258,7 +6258,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 在途上限准入。/health 与 / 例外：探活与编排器不该因业务繁忙而收 503。
-  const isLiveness = url.pathname === '/health' || url.pathname === '/';
+  const isLiveness = url.pathname === '/health' || url.pathname === '/' || url.pathname === '/favicon.ico';
   if (!isLiveness && MAX_INFLIGHT > 0) {
     if (inflightCount >= MAX_INFLIGHT) {
       log('warn', 'In-flight limit reached, rejecting request', {
@@ -6294,6 +6294,13 @@ const server = http.createServer(async (req, res) => {
       await handleModels(req, res);
     } else if (url.pathname === '/health' || url.pathname === '/') {
       handleHealth(req, res);
+    } else if (url.pathname === '/favicon.ico') {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">⚡</text></svg>';
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.end(svg);
     } else {
       sendJSON(res, 404, { error: { message: 'Not found', type: 'not_found' } });
     }

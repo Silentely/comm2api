@@ -66,6 +66,12 @@ async function loadQuota(silent = true) {
   }
 }
 
+function qPct(acc, name) {
+  const w = acc && acc.windows && acc.windows[name]
+  if (!w || w.percentUsed === null || w.percentUsed === undefined) return null
+  return Math.round(w.percentUsed * 1000) / 10
+}
+
 const quotaAccounts = computed(() => quota.value?.accounts || [])
 
 // 五小时额度卡片（高频动态额度）
