@@ -125,6 +125,23 @@ export function fmtTime(v) {
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+/**
+ * 格式化重置时间戳为直观的日期与时间（当年显示 MM-DD HH:mm，跨年显示 YYYY-MM-DD HH:mm）。
+ * 示例：1764136140000 -> "11-26 05:49"
+ */
+export function fmtResetTime(v) {
+  if (isMissing(v)) return ""
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ""
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, "0")
+  const date = String(d.getDate()).padStart(2, "0")
+  const hour = String(d.getHours()).padStart(2, "0")
+  const min = String(d.getMinutes()).padStart(2, "0")
+  const nowYear = new Date().getFullYear()
+  return year === nowYear ? `${month}-${date} ${hour}:${min}` : `${year}-${month}-${date} ${hour}:${min}`
+}
+
 export function fmtLatency(ms) {
   if (isMissing(ms)) return MISSING
   const num = Number(ms)

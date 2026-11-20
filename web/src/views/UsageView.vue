@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { loadStats } from '../store'
 import { toast } from '../toast'
-import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtTokens } from '../utils'
+import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtResetTime, fmtTokens } from '../utils'
 import StatCard from '../components/StatCard.vue'
 
 const data = ref(null)
@@ -68,10 +68,12 @@ function qResetLeft(w) {
 function qResetText(w) {
   const sec = qResetLeft(w)
   if (sec === null) return '重置时间未知'
-  if (sec <= 0) return '已到重置时间（等待重新确认）'
+  const timeStr = w.resetAtMs ? fmtResetTime(w.resetAtMs) : ""
+  if (sec <= 0) return timeStr ? `已到重置时间（${timeStr}）` : '已到重置时间（等待重新确认）'
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
-  return h > 0 ? `${h} 小时 ${m} 分后重置` : `${m} 分后重置`
+  const countdown = h > 0 ? `${h} 小时 ${m} 分后重置` : `${m} 分后重置`
+  return timeStr ? `${countdown}（${timeStr}）` : countdown
 }
 
 function quoteStateTone(acc) {

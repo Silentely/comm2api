@@ -25,6 +25,7 @@ import {
   fmtNum,
   fmtPct,
   fmtTokens,
+  fmtResetTime,
   fmtUptime,
 } from '../utils'
 import StatCard from '../components/StatCard.vue'
@@ -50,8 +51,10 @@ const requests = computed(() => d.value.requests || {})
 const tokens = computed(() => d.value.tokens || {})
 const admin = computed(() => d.value.admin || {})
 const storageInfo = computed(() => admin.value.storage || { mode: 'file', redis: {} })
+const clientKeys = computed(() => d.value.clientKeys || { total: 0, enabled: 0 })
+const protection = computed(() => d.value.protection || 'off')
 
-// 官方额度概览（仪表盘只看“现在能用几个账号、谁快满了”）
+// 官方额度概览
 const quota = ref(null)
 
 async function loadQuota(silent = true) {
@@ -63,11 +66,107 @@ async function loadQuota(silent = true) {
   }
 }
 
-function qPct(acc, name) {
-  const w = acc && acc.windows && acc.windows[name]
-  if (!w || w.percentUsed === null || w.percentUsed === undefined) return null
-  return Math.round(w.percentUsed * 1000) / 10
-}
+const quotaAccounts = computed(() => quota.value?.accounts || [])
+
+// 五小时额度卡片（高频动态额度）
+const fiveHourQuota = computed(() => {
+  if (!quotaAccounts.value.length) {
+    return {
+      value: '-',
+      sub: '未配置上游 Key 或尚未采集',
+      tone: 'muted',
+    }
+  }
+  const list = quotaAccounts.value
+  let maxPct = null
+  let earliestReset = null
+  let exhausted = 0
+  let warning = 0
+
+  for (const acc of list) {
+    const w = acc.windows?.fiveHour
+    if (w) {
+      if (typeof w.percentUsed === 'number') {
+        const pct = Math.round(w.percentUsed * 1000) / 10
+        if (maxPct === null || pct > maxPct) maxPct = pct
+      }
+      if (w.resetAtMs) {
+        if (!earliestReset || w.resetAtMs < earliestReset) earliestReset = w.resetAtMs
+      }
+    }
+    if (acc.state === 'quota_exhausted') exhausted++
+    else if (acc.state === 'quota_warning') warning++
+  }
+
+  let tone = 'green'
+  if (exhausted > 0) tone = 'red'
+  else if (warning > 0 || (maxPct !== null && maxPct >= 90)) tone = 'yellow'
+
+  const value = maxPct !== null ? `${maxPct}%` : (exhausted > 0 ? '已耗尽' : '充足')
+  let resetPart = ''
+  if (earliestReset) {
+    const sec = Math.max(0, Math.round((earliestReset - now.value) / 1000))
+    const h = Math.floor(sec / 3600)
+    const m = Math.floor((sec % 3600) / 60)
+    const cd = h > 0 ? `${h}h${m}m后` : `${m}m后`
+    resetPart = `重置：${cd}（${fmtResetTime(earliestReset)}）`
+  }
+
+  const sub = [
+    `可用 ${list.length - exhausted} / ${list.length}`,
+    resetPart,
+  ].filter(Boolean).join(' · ')
+
+  return { value, sub, tone }
+})
+
+// 周/月度长期额度卡片
+const longTermQuota = computed(() => {
+  if (!quotaAccounts.value.length) {
+    return {
+      value: '-',
+      sub: '未配置上游 Key 或尚未采集',
+      tone: 'muted',
+    }
+  }
+  const list = quotaAccounts.value
+  let maxPct = null
+  let earliestReset = null
+
+  for (const acc of list) {
+    const w = acc.windows?.monthly || acc.windows?.weekly
+    if (w) {
+      if (typeof w.percentUsed === 'number') {
+        const pct = Math.round(w.percentUsed * 1000) / 10
+        if (maxPct === null || pct > maxPct) maxPct = pct
+      }
+      if (w.resetAtMs) {
+        if (!earliestReset || w.resetAtMs < earliestReset) earliestReset = w.resetAtMs
+      }
+    }
+  }
+
+  const tone = (maxPct !== null && maxPct >= 90) ? 'yellow' : 'green'
+  const value = maxPct !== null ? `${maxPct}%` : '充足'
+  const resetPart = earliestReset ? `重置：${fmtResetTime(earliestReset)}` : '配额充足'
+  const sub = `${resetPart} · 账号 ${list.length} 个`
+
+  return { value, sub, tone }
+})
+
+// 上游 Key 池状态（整合可用、总数、冷却、异常与调度策略）
+const keyPoolStatus = computed(() => {
+  const total = keysInfo.value.total || 0
+  const enabled = keysInfo.value.enabled || 0
+  const cooldown = keysInfo.value.cooldown || 0
+  const unhealthy = keysInfo.value.unhealthy || 0
+  const tone = unhealthy > 0 ? 'red' : (cooldown > 0 ? 'yellow' : (enabled > 0 ? 'green' : 'muted'))
+  return {
+    value: `${fmtNum(enabled)} / ${fmtNum(total)}`,
+    sub: `轮询：${strategyText.value} · 冷却 ${fmtNum(cooldown)} · 异常 ${fmtNum(unhealthy)}`,
+    tone,
+  }
+})
 
 const uptimeText = computed(() => {
   const base = Number(d.value.uptimeSec)
@@ -113,7 +212,7 @@ watch(
 )
 
 async function doRefreshStats() {
-  await loadStats(true)
+  await Promise.all([loadStats(true), loadQuota(true)])
 }
 
 async function doRefreshModels() {
@@ -191,7 +290,10 @@ onMounted(() => {
   loadKeys()
   loadQuota()
   loadTestPrompt()
-  statsTimer = setInterval(() => loadStats(true), 10000)
+  statsTimer = setInterval(() => {
+    loadStats(true)
+    loadQuota(true)
+  }, 10000)
 })
 
 onUnmounted(() => {
@@ -214,10 +316,15 @@ onUnmounted(() => {
     </div>
 
     <div class="cards">
-      <StatCard :value="fmtNum(keysInfo.total)" label="Key 总数" tone="blue" :sub="`启用 ${fmtNum(keysInfo.enabled)} / 冷却 ${fmtNum(keysInfo.cooldown)}`" />
-      <StatCard :value="fmtNum(keysInfo.enabled)" label="启用中" tone="green" :sub="`共 ${fmtNum(keysInfo.total)} 个 Key`" />
-      <StatCard :value="fmtNum(keysInfo.cooldown)" label="冷却中" tone="yellow" :sub="`异常 ${fmtNum(keysInfo.unhealthy)}`" />
-      <StatCard :value="fmtNum(keysInfo.unhealthy)" label="异常 Key" tone="red" sub="需人工检查" />
+      <StatCard :value="fiveHourQuota.value" label="五小时额度（最高占用）" :tone="fiveHourQuota.tone" :sub="fiveHourQuota.sub" />
+      <StatCard :value="longTermQuota.value" label="周/月度额度" :tone="longTermQuota.tone" :sub="longTermQuota.sub" />
+      <StatCard :value="keyPoolStatus.value" label="上游 Key 池（可用/总数）" :tone="keyPoolStatus.tone" :sub="keyPoolStatus.sub" />
+      <StatCard
+        :value="`${fmtNum(clientKeys.enabled)} / ${fmtNum(clientKeys.total)}`"
+        label="2API 客户端 Key"
+        :tone="clientKeys.total > 0 ? 'blue' : 'yellow'"
+        :sub="`访问保护：${protection === 'on' ? '已启用（必须凭证）' : '未启用（免鉴权）'}`"
+      />
       <StatCard :value="fmtNum(requests.today)" label="今日请求" tone="blue" :sub="`累计 ${fmtNum(requests.total)}`" />
       <StatCard :value="fmtNum(requests.failedToday)" label="今日失败" tone="red" :sub="`进行中 ${fmtNum(requests.inflight)}`" />
       <StatCard

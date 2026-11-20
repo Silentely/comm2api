@@ -22,6 +22,7 @@ import {
   fmtLatency,
   fmtNum,
   fmtRemaining,
+  fmtResetTime,
   fmtTokens,
   remainingSeconds,
   truncate,
@@ -584,8 +585,11 @@ onUnmounted(() => {
                 <span v-else class="text-dim">未采集</span>
               </td>
               <td>
-                <div v-if="resetLeft(k) !== null" class="mono">
-                  {{ resetLeft(k) > 0 ? fmtRemaining(resetLeft(k)) : '即将重置' }}
+                <div v-if="resetLeft(k) !== null">
+                  <div class="mono">{{ resetLeft(k) > 0 ? fmtRemaining(resetLeft(k)) : '即将重置' }}</div>
+                  <div v-if="fiveHour(k)?.resetAtMs" class="text-dim mono" style="font-size: 11px">
+                    {{ fmtResetTime(fiveHour(k).resetAtMs) }}
+                  </div>
                 </div>
                 <div v-else class="text-dim">-</div>
                 <div class="text-dim" style="font-size: 11px">{{ quotaFetchedText(k) }}</div>
