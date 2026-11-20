@@ -1,0 +1,22 @@
+{
+  "name": "comm2api",
+  "version": "1.6.0",
+  "type": "module",
+  "description": "Command Code → OpenAI 兼容代理",
+  "license": "MIT",
+  "main": "proxy.mjs",
+  "packageManager": "pnpm@10.34.9",
+  "scripts": {
+    "start": "node proxy.mjs",
+    "dev": "node --watch --watch-path=./proxy.mjs --watch-path=./config.json --watch-path=./lib proxy.mjs",
+    "test": "node --test test/*.test.mjs",
+    "build:web": "pnpm --dir web install && pnpm --dir web run build",
+    "dev:web": "pnpm --dir web run dev",
+    "test:bun": "bun test",
+    "docker:build": "docker build -t comm2api:latest .",
+    "docker:build:multi": "docker buildx build --platform linux/amd64,linux/arm64 -t comm2api:latest ."
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

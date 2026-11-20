@@ -1,0 +1,49 @@
+# 本地开发编排：基于当前源码构建镜像，不使用 GHCR 预构建版本。
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# 与 docker-compose.yml 的唯一区别是把预构建的 image 换成 build: .，
+# 其余端口映射、配置挂载、健康检查保持一致，便于两套编排互相对照。
+services:
+  proxy:
+    build: .
+    # 本地构建产物单独命名，避免与从 GHCR 拉取的 latest 相互覆盖
+    image: comm2api:local
+    ports:
+      # 宿主端口 → 容器内固定 3050，可用 PROXY_PORT 自定义宿主侧
+      - "${PROXY_PORT:-3050}:3050"
+    environment:
+      # 容器内端口固定 3050：环境变量优先级高于挂载的 config.json（见 README「Docker 部署」）
+      - PORT=3050
+      - HOST=0.0.0.0
+      # 其余变量按需注入：值取自「宿主环境变量」或「同目录 .env」（compose 自动读取 .env，
+      # 且宿主环境变量优先）。
+      #
+      # 这里刻意用列表的「无值」形式（`- VAR`）而不是 `VAR: "${VAR:-}"`：
+      # 实测前者在未设置时容器里就是「变量不存在」，后者会注入一个**空串** ——
+      # 而空串作为环境变量同样会压过 config.json，等于静默屏蔽掉那边的 apiKey / proxyKey。
+      - ADMIN_PASSWORD
+      - PROXY_KEY
+      - CC_API_KEY
+      - CC_API_BASE
+      - CC_UPSTREAM_PROXY
+      - CC_LOG_LEVEL
+      - CC_USE_PROVIDER_MODELS
+      - CC_MAX_INFLIGHT
+      - CMD_ZDR
+      - CC_FINGERPRINT_SALT
+      - CC_DEVICE_PROJECT_DIR
+      - ADMIN_COOKIE_SECURE
+    volumes:
+      # 挂载本地配置，提供 proxyKey / apiKey
+      # ⚠️ 首次部署先执行：cp config.json.example config.json
+      #    若宿主该文件不存在，Docker 会创建同名**目录**，导致配置加载失败并回退到内置默认值
+      - ./config.json:/app/config.json:ro
+      # 持久化数据目录：后台添加的 Key、后台密码、模型测试结论都在这里
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://127.0.0.1:3050/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

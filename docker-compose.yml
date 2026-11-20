@@ -1,0 +1,49 @@
+services:
+  proxy:
+    # 默认使用 GitHub Actions 预构建的多架构镜像（linux/amd64 + linux/arm64）。
+    # 需要基于当前源码本地构建时，改用：docker compose -f docker-compose.local.yml up -d --build
+    #
+    # 用 :v2 而不是 :latest：本项目分版本维护，:latest 跟随 master / main / release
+    # （legacy 线）。这里是 v2 分支，跟着它走的用户必须拿到 v2 的镜像，
+    # 否则「检出 v2 + compose up」会静默拉起旧版。
+    image: ghcr.io/silentely/comm2api:latest
+    ports:
+      # 宿主端口 → 容器内固定 3050，可用 PROXY_PORT 自定义宿主侧
+      - "${PROXY_PORT:-3050}:3050"
+    environment:
+      # 容器内端口固定 3050：环境变量优先级高于挂载的 config.json（见 README「Docker 部署」）
+      - PORT=3050
+      - HOST=0.0.0.0
+      # 其余变量按需注入：值取自「宿主环境变量」或「同目录 .env」（compose 自动读取 .env，
+      # 且宿主环境变量优先）。
+      #
+      # 这里刻意用列表的「无值」形式（`- VAR`）而不是 `VAR: "${VAR:-}"`：
+      # 实测前者在未设置时容器里就是「变量不存在」，后者会注入一个**空串** ——
+      # 而空串作为环境变量同样会压过 config.json，等于静默屏蔽掉那边的 apiKey / proxyKey。
+      - ADMIN_PASSWORD
+      - PROXY_KEY
+      - CC_API_KEY
+      - CC_API_BASE
+      - CC_UPSTREAM_PROXY
+      - CC_LOG_LEVEL
+      - CC_USE_PROVIDER_MODELS
+      - CC_MAX_INFLIGHT
+      - CMD_ZDR
+      - CC_FINGERPRINT_SALT
+      - CC_DEVICE_PROJECT_DIR
+      - ADMIN_COOKIE_SECURE
+    volumes:
+      # 挂载本地配置，提供 proxyKey / apiKey
+      # ⚠️ 首次部署先执行：cp config.json.example config.json
+      #    若宿主该文件不存在，Docker 会创建同名**目录**，导致配置加载失败并回退到内置默认值
+      - ./config.json:/app/config.json:ro
+      # 持久化数据目录：后台添加的 Key、后台密码、模型测试结论都在这里。
+      # 不挂卷的话，容器重建后后台配置会全部丢失（目录不存在时 Docker 会自动创建）
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://127.0.0.1:3050/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
