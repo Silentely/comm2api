@@ -15,9 +15,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { parse, compileTemplate } from '../web/node_modules/vue/compiler-sfc/index.js';
-import { createSSRApp } from '../web/node_modules/vue/dist/vue.esm-bundler.js';
-import { renderToString } from '../web/node_modules/vue/server-renderer/index.mjs';
+import { execSync } from 'node:child_process';
 import { allocPort, closeServer, seedConfig, startMockUpstream, startProxy } from './helpers.mjs';
 
 // 独立数据目录隔离
@@ -364,6 +362,15 @@ test('M4: strict_bind 在空池、纯轮换池或显式指定时，坚决拒绝�
 // ── 前端测试: 真实挂载编译 ProxiesView 组件，守住显示值变异（M3 写死 0 必红） ──
 
 test('前端测试: 真实挂载 ProxiesView 组件渲染，咬住变异（显示值写死 0 即变红）', async () => {
+  const vueCompilerPath = join(process.cwd(), 'web/node_modules/vue/compiler-sfc/index.js');
+  if (!fs.existsSync(vueCompilerPath)) {
+    execSync('pnpm --dir web install --frozen-lockfile', { stdio: 'inherit' });
+  }
+
+  const { parse, compileTemplate } = await import(pathToFileURL(join(process.cwd(), 'web/node_modules/vue/compiler-sfc/index.js')).href);
+  const { createSSRApp } = await import(pathToFileURL(join(process.cwd(), 'web/node_modules/vue/dist/vue.esm-bundler.js')).href);
+  const { renderToString } = await import(pathToFileURL(join(process.cwd(), 'web/node_modules/vue/server-renderer/index.mjs')).href);
+
   const vueFile = fs.readFileSync('web/src/views/ProxiesView.vue', 'utf8');
 
   // 1. 编译并渲染真实的 ProxiesView.vue 模板
