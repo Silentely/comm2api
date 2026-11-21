@@ -160,3 +160,29 @@ test('strict_bind 持久化：重启后模式与目标都还在', async () => {
   assert.equal(pool2.bindingFor('user_a').mode, 'strict_bind');
   assert.equal(pool2.bindingFor('user_a').proxyId, idA);
 });
+
+test('默认绑定自动分配独占代理，避免多 Key 共享同一 IP', () => {
+  const { pool } = freshPool();
+  const fp1 = pool.fingerprintForKey('user_a');
+  const fp2 = pool.fingerprintForKey('user_b');
+
+  // 未指定代理时设为 strict_bind，两账号应被自动分配到不同代理
+  const r1 = pool.setBinding(fp1, 'strict_bind');
+  assert.equal(r1.ok, true);
+  assert.equal(r1.autoPicked, true);
+  assert.ok(r1.proxyId);
+
+  // 第二个 Key 自动选其他空闲独占代理，防止同 IP 多 Key 风险
+  const r2 = pool.setBinding(fp2, 'strict_bind');
+  assert.equal(r2.ok, true);
+  assert.equal(r2.autoPicked, true);
+  assert.ok(r2.proxyId);
+  assert.notEqual(r1.proxyId, r2.proxyId, '多个 Key 默认绑定应自动隔离在不同代理');
+
+  const views = pool.keyViews();
+  const view1 = views.find(v => v.keyId === 'id_a');
+  const view2 = views.find(v => v.keyId === 'id_b');
+  assert.equal(view1.sharedKeysCount, 1, 'Key 1 独占其代理');
+  assert.equal(view2.sharedKeysCount, 1, 'Key 2 独占其代理');
+  assert.equal(view1.proxyPool, false);
+});

@@ -1157,7 +1157,6 @@ async function probeModelInner({ key, model, message, mode = 'single' }) {
   }
 
   try {
-    await ensureInitialized(key);
     // 模型测试同样是一次真实上游调用：走该 Key 绑定的那条代理，
     // 否则「测试通过但实际请求走别的出口」会让人得出错误结论。
     let probeProxy;
@@ -1170,6 +1169,7 @@ async function probeModelInner({ key, model, message, mode = 'single' }) {
       }
       throw e;
     }
+    await ensureInitialized(key, null, probeProxy);
     const response = await forwardToCC(ccBody, key, {}, null, null, probeProxy);
     // 探测也是一次真实的上游调用，同样要计入该 Key 的用量 ——
     // 否则「我只在后台点测试」的用量会全部显示为 0（用户正是这么反馈的）
@@ -3025,7 +3025,6 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
 
   for (let attempt = 1; ; attempt++) {
     tried.add(key);
-    await ensureInitialized(key, signal);
 
     // 每条 Key 的代理绑定：auto 静态绑定（故障时转移）/ bind 固定（故障时临时转移）/
     // strict_bind 严格固定（故障时失败关闭）/ rotate 每次轮换
@@ -3046,6 +3045,8 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
 
     const transport = route.transport;
     if (transport) triedProxies.add(transport.id);
+    // 关键：预请求（指纹+生命周期）必须与生成请求走本次选定的同一条代理，传入 route.address
+    await ensureInitialized(key, signal, route.address);
     // let：输出上限降档分支会把消费过的响应换成还原出来的等价响应
     let response;
     try {
@@ -4695,10 +4696,13 @@ async function handleMessages(req, res) {
 
   try {
     // 转发到 CC API（遇 Key 失效/限流自动换 Key 重试）
-    const { response: ccResponse } = await forwardWithKeyRetry(
+    const { response: ccResponse, accountKey, route: initialRoute } = await forwardWithKeyRetry(
       ccBody, apiKey, req.headers, abortController.signal, undefined,
       { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'messages' }
     );
+    // 关键：若重试换了账号，后续搜索与续写轮必须归属到实际服务 Key 与同一代理路由
+    if (accountKey) apiKey = accountKey;
+    const currentRoute = initialRoute;
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       const mapped = mapCcError(ccResponse.status, errorText);
@@ -4891,7 +4895,22 @@ async function handleMessages(req, res) {
           ccBody = buildCcRequest(openaiReq);
           log('info', 'Web search round', { round: round + 1, searches: assistantToolCalls.length, removedTools: [...exhausted], id: messageId });
 
-          roundResponse = await forwardToCC(ccBody, apiKey, req.headers, abortController.signal);
+          // 续写轮必须复用该 Key 本次选定的代理出口，与首轮同一出口；拿不到原 route 时重新解析，绝不退回全局/直连
+          let continuationProxyUrl;
+          if (currentRoute && currentRoute.address !== undefined) {
+            continuationProxyUrl = currentRoute.address;
+          } else {
+            try {
+              continuationProxyUrl = proxyAddressFor(apiKey);
+            } catch (e) {
+              log('error', 'Web search continuation proxy unavailable', { error: e.message, keyId: accountIdOf(apiKey) });
+              ctx.upstreamError = { status: 503, body: { error: { type: 'service_unavailable', message: `出站代理不可用：${e.message}` } } };
+              await emit(`event: error\ndata: ${JSON.stringify({ type: 'error', error: ctx.upstreamError.body.error })}\n\n`);
+              break;
+            }
+          }
+
+          roundResponse = await forwardToCC(ccBody, apiKey, req.headers, abortController.signal, undefined, continuationProxyUrl);
           if (!roundResponse.ok) {
             const errorText = await roundResponse.text().catch(() => '');
             const mapped = mapCcError(roundResponse.status, errorText);
@@ -6005,7 +6024,6 @@ async function handleResponses(req, res) {
   });
 
   try {
-    await ensureInitialized(apiKey, abortController.signal);
     const { response: ccResponse } = await forwardWithKeyRetry(ccBody, apiKey, req.headers, abortController.signal, promptCacheKey,
       { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'responses' });
     if (!ccResponse.ok) {

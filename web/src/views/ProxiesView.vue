@@ -297,14 +297,9 @@ function firstEnabledProxyId() {
  */
 function onModeChange(b, mode) {
   const keyId = keyIdOf(b)
-  // 「固定」与「严格固定」都需要一条具体代理：缺省时自动挑一条，
-  // 否则会出现「选了模式、却没地方选代理」的空窗。
+  // 「固定」与「严格固定」：优先保留已绑定的代理；若未指定则留空由服务端智能分配独占/空闲代理（防同 IP 多 Key）
   if (mode === 'bind' || mode === 'strict_bind') {
-    const pid = b.proxyId || firstEnabledProxyId()
-    if (!pid) {
-      toast.error('代理池为空，请先添加并启用一条代理')
-      return
-    }
+    const pid = b.proxyId || ''
     setBinding(keyId, mode, pid)
     return
   }
@@ -546,6 +541,7 @@ onMounted(async () => {
           <strong>自动</strong>：按 <code>i % N</code> 静态分配，代理故障时转移到最空闲的健康代理，恢复后自动迁回。<br />
           <strong>固定</strong>：优先始终走指定的那一条；那条连不上时临时转移到健康代理（请求不会因此失败），
           它恢复健康后自动迁回 —— 要保证「这个号优先从这个 IP 出去」时用它。<br />
+          <strong>严格固定</strong>：只能用这条代理，它不可用时该账号停止派发（不转移、不直连）—— <strong>防同 IP 多 Key 封号</strong>，确保代理严格隔离。<br />
           <strong>每次轮换</strong>：每次尝试都重新挑一条健康代理 —— 要的就是每次换 IP。
         </div>
       </div>
@@ -604,6 +600,9 @@ onMounted(async () => {
                     · 临时转移自 {{ b.boundProxyAddress }}，恢复后自动迁回
                   </span>
                   <span v-if="b.strict" class="text-warn">· 严格固定：不使用其它出口</span>
+                  <span v-if="!b.proxyPool && b.sharedKeysCount > 1" class="text-warn" style="font-size: 11px" title="当前有多个账号使用同一代理，可能存在同 IP 多 Key 风险">
+                    · ⚠️ {{ b.sharedKeysCount }} Key 共用
+                  </span>
                 </template>
                 <template v-else>每次轮换（不固定）</template>
                 <div v-if="b.unavailableReason" class="text-danger" style="font-size: 11px">
