@@ -4,7 +4,8 @@
 // 3. P1-1: bind 故障转移后，sharedKeysCount 必须按实际出口统计，不漏报共用
 // 4. P1-2: 搜索与续写轮使用实际服务 Key 而非入口 Key
 // 5. P1-3: 独占分配排除 #pool 轮换池
-// 6. 前端测试: 守住「多 Key 共用代理」的警示渲染逻辑，防止写死 0
+// 6. M4: strict_bind 彻底禁止绑定 direct 或 #pool（空池/纯轮换池/显式绑定全拦截）
+// 7. 前端测试: 真正挂载编译 ProxiesView.vue 组件，守住显示值变异（M3 写死 0 必红）
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -13,6 +14,8 @@ import fs from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { parse, compileTemplate } from '../web/node_modules/vue/compiler-sfc/index.js';
 import { createSSRApp } from '../web/node_modules/vue/dist/vue.esm-bundler.js';
 import { renderToString } from '../web/node_modules/vue/server-renderer/index.mjs';
 import { allocPort, closeServer, seedConfig, startMockUpstream, startProxy } from './helpers.mjs';
@@ -21,7 +24,7 @@ import { allocPort, closeServer, seedConfig, startMockUpstream, startProxy } fro
 process.env.CC_DATA_DIR = mkdtempSync(join(tmpdir(), 'ccp-iso-suite-'));
 process.env.CC_ENV_FILE = join(tmpdir(), 'ccp-no-dotenv');
 
-const { createProxyPool } = await import('../lib/proxies.mjs');
+const { createProxyPool, proxyFingerprint } = await import('../lib/proxies.mjs');
 
 const nd = (...lines) => lines.map(l => JSON.stringify(l));
 
@@ -328,44 +331,87 @@ test('P1-3: strict_bind 默认分配必须排除轮换池 (#pool)，只选静态
   assert.notEqual(r.proxyId, pPool.entry.id, '严禁将 strict_bind 自动绑定到轮换池');
 });
 
-// ── 前端测试: 守住「多 Key 共用代理」的警示渲染逻辑 ──
+// ── M4: strict_bind 彻底禁止绑定 direct 或 #pool（空池/纯轮换池/显式绑定全拦截） ──
 
-test('前端测试: ProxiesView 组件警示渲染逻辑必须能咬住变异（写死 0 即变红）', async () => {
+test('M4: strict_bind 在空池、纯轮换池或显式指定时，坚决拒绝绑定 direct 或 #pool', () => {
+  // Case A: 空池（只有系统默认兜底 direct）
+  const emptyPool = createCleanPool({ keys: ['user_empty'] });
+  const fpEmpty = emptyPool.fingerprintForKey('user_empty');
+  const rEmpty = emptyPool.setBinding(fpEmpty, 'strict_bind');
+  assert.equal(rEmpty.ok, false, '空池时 strict_bind 必须报错拒绝，绝不允许静默绑 direct');
+
+  // Case B: 纯 #pool（池中只有 1 条轮换池代理）
+  const poolOnly = createCleanPool({ keys: ['user_pool_only'] });
+  const pOnly = poolOnly.add(`http://127.0.0.1:${portSeq++}#pool`);
+  const fpPool = poolOnly.fingerprintForKey('user_pool_only');
+  const rPool = poolOnly.setBinding(fpPool, 'strict_bind');
+  assert.equal(rPool.ok, false, '纯轮换池时 strict_bind 必须报错拒绝，绝不允许绑定到轮换池');
+
+  // Case C: 显式指定绑定到 direct
+  const poolWithStatic = createCleanPool({ keys: ['user_explicit'] });
+  const pStatic = poolWithStatic.add(`http://127.0.0.1:${portSeq++}`);
+  const fpExplicit = poolWithStatic.fingerprintForKey('user_explicit');
+  const directId = proxyFingerprint('direct');
+  const rDirect = poolWithStatic.setBinding(fpExplicit, 'strict_bind', directId);
+  assert.equal(rDirect.ok, false, '显式绑定 direct 时 strict_bind 必须拒绝');
+
+  // Case D: 显式指定绑定到 #pool
+  const poolEntry = poolWithStatic.add(`http://127.0.0.1:${portSeq++}#pool`);
+  const rPoolExplicit = poolWithStatic.setBinding(fpExplicit, 'strict_bind', poolEntry.entry.id);
+  assert.equal(rPoolExplicit.ok, false, '显式绑定 #pool 时 strict_bind 必须拒绝');
+});
+
+// ── 前端测试: 真实挂载编译 ProxiesView 组件，守住显示值变异（M3 写死 0 必红） ──
+
+test('前端测试: 真实挂载 ProxiesView 组件渲染，咬住变异（显示值写死 0 即变红）', async () => {
   const vueFile = fs.readFileSync('web/src/views/ProxiesView.vue', 'utf8');
 
-  // 1. 守住源码模板中严密的 v-if 条件与元素内容
-  assert.ok(vueFile.includes('!b.proxyPool && b.sharedKeysCount > 1'),
-    'ProxiesView 必须包含对 !proxyPool && sharedKeysCount > 1 的判定');
-  assert.ok(vueFile.includes('Key 共用'),
-    'ProxiesView 必须包含 Key 共用 警示文本');
+  // 1. 编译并渲染真实的 ProxiesView.vue 模板
+  const renderProxiesViewTemplate = async (vueSource, bindings) => {
+    const parsed = parse(vueSource);
+    const compiled = compileTemplate({ source: parsed.descriptor.template.content, id: 'proxies-view-test', ssr: true });
+    const serverRendererUrl = pathToFileURL(join(process.cwd(), 'web/node_modules/vue/server-renderer/index.mjs')).href;
+    const code = compiled.code.replace(/from "vue\/server-renderer"/g, `from "${serverRendererUrl}"`);
+    const mod = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
 
-  // 2. 模拟真实 SSR 渲染，咬死警示条件与计数展示
-  const renderItem = async (binding) => {
-    const app = createSSRApp({
-      data() {
-        return { b: binding };
+    const Comp = {
+      ssrRender: mod.ssrRender,
+      setup() {
+        return {
+          state: { list: [], bindings, loaded: true },
+          addForm: { value: '' }, busy: { rowId: '' }, editing: { id: '' },
+          revealed: {}, testResults: {}, selected: [], bulkOpen: false, bulkText: '',
+          keyIdOf: (b) => b.keyId, keyOf: (b) => ({ label: 'Account ' + b.keyId }),
+          fmtNum: (n) => String(n), fmtDateTime: (d) => String(d), fmtLatency: (l) => String(l),
+          healthyCount: 1, poolCount: 0, allSelected: false, someSelected: false,
+        };
       },
-      template: `
-        <div>
-          <span v-if="!b.proxyPool && b.sharedKeysCount > 1" class="text-warn">
-            · ⚠️ {{ b.sharedKeysCount }} Key 共用
-          </span>
-        </div>
-      `,
-    });
-    return await renderToString(app);
+    };
+    return await renderToString(createSSRApp(Comp));
   };
 
-  // Case A: 两个非轮换 Key 共用同一代理 -> 必须显示警示
-  const htmlWarn = await renderItem({ proxyPool: false, sharedKeysCount: 2 });
-  assert.match(htmlWarn, /⚠️ 2 Key 共用/, '共用 2 Key 时必须渲染警示内容');
+  // Case A: 两个静态 Key 共用同一代理 -> 必须显示「⚠️ 2 Key 共用」
+  const htmlWarnStatic = await renderProxiesViewTemplate(vueFile, [
+    { keyId: 'k1', proxyAddress: 'http://127.0.0.1:8080', sharedKeysCount: 2, proxyPool: false },
+  ]);
+  assert.match(htmlWarnStatic, /⚠️ 2 Key 共用/, '共用 2 Key 时真实组件渲染必须包含 ⚠️ 2 Key 共用');
 
-  // Case B: 独占代理 -> 绝不能显示警示
-  const htmlSafe = await renderItem({ proxyPool: false, sharedKeysCount: 1 });
-  assert.doesNotMatch(htmlSafe, /Key 共用/, '独占 1 Key 时不应渲染警示');
+  // Case B: 两个 Key 共用轮换池 -> 必须分开提示「⚠️ 2 Key 共用轮换池」，不能被 proxyPool=true 静默吞掉
+  const htmlWarnPool = await renderProxiesViewTemplate(vueFile, [
+    { keyId: 'k2', proxyAddress: 'http://127.0.0.1:8081', sharedKeysCount: 2, proxyPool: true },
+  ]);
+  assert.match(htmlWarnPool, /⚠️ 2 Key 共用轮换池/, '轮换池有 2 Key 时真实组件必须提示 ⚠️ 2 Key 共用轮换池');
 
-  // Case C: 变异检验：若把 sharedKeysCount 写死为 0，Case A 必须红
-  const mutantBinding = { proxyPool: false, sharedKeysCount: 0 };
-  const htmlMutant = await renderItem(mutantBinding);
-  assert.doesNotMatch(htmlMutant, /Key 共用/, '变异计数为 0 时不能渲染警示，验证了测试的敏感度');
+  // Case C: 独占静态代理 (sharedKeysCount = 1) -> 绝不展示共用警示
+  const htmlSafe = await renderProxiesViewTemplate(vueFile, [
+    { keyId: 'k3', proxyAddress: 'http://127.0.0.1:8082', sharedKeysCount: 1, proxyPool: false },
+  ]);
+  assert.doesNotMatch(htmlSafe, /Key 共用/, '独占 1 Key 时不展示共用警示');
+
+  // Case D (变异敏感性自检): 若把源码中模板插值显示值强行写死为 0
+  const mutantSource = vueFile.replace('{{ b.sharedKeysCount }}', '{{ 0 }}');
+  const htmlMutant = await renderProxiesViewTemplate(mutantSource, [
+    { keyId: 'k1', proxyAddress: 'http://127.0.0.1:8080', sharedKeysCount: 2, proxyPool: false },
+  ]);
+  assert.equal(/⚠️ 2 Key 共用/.test(htmlMutant), false, '模板显示值写死为 0 时正常判据必须失效变红');
 });

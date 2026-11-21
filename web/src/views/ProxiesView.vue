@@ -603,6 +603,12 @@ onMounted(async () => {
                   <span v-if="!b.proxyPool && b.sharedKeysCount > 1" class="text-warn" style="font-size: 11px" title="当前有多个账号使用同一代理，可能存在同 IP 多 Key 风险">
                     · ⚠️ {{ b.sharedKeysCount }} Key 共用
                   </span>
+                  <span v-if="b.proxyPool && b.sharedKeysCount > 1" class="text-warn" style="font-size: 11px" title="当前有多个账号使用同一轮换代理池">
+                    · ⚠️ {{ b.sharedKeysCount }} Key 共用轮换池
+                  </span>
+                  <span v-else-if="b.proxyPool" class="hint" style="font-size: 11px" title="轮换代理池（每次连接出口 IP 变化）">
+                    · 轮换池
+                  </span>
                 </template>
                 <template v-else>每次轮换（不固定）</template>
                 <div v-if="b.unavailableReason" class="text-danger" style="font-size: 11px">

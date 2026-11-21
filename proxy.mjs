@@ -4895,20 +4895,9 @@ async function handleMessages(req, res) {
           ccBody = buildCcRequest(openaiReq);
           log('info', 'Web search round', { round: round + 1, searches: assistantToolCalls.length, removedTools: [...exhausted], id: messageId });
 
-          // 续写轮必须复用该 Key 本次选定的代理出口，与首轮同一出口；拿不到原 route 时重新解析，绝不退回全局/直连
-          let continuationProxyUrl;
-          if (currentRoute && currentRoute.address !== undefined) {
-            continuationProxyUrl = currentRoute.address;
-          } else {
-            try {
-              continuationProxyUrl = proxyAddressFor(apiKey);
-            } catch (e) {
-              log('error', 'Web search continuation proxy unavailable', { error: e.message, keyId: accountIdOf(apiKey) });
-              ctx.upstreamError = { status: 503, body: { error: { type: 'service_unavailable', message: `出站代理不可用：${e.message}` } } };
-              await emit(`event: error\ndata: ${JSON.stringify({ type: 'error', error: ctx.upstreamError.body.error })}\n\n`);
-              break;
-            }
-          }
+          // 续写轮必须复用该 Key 本次选定的代理出口（currentRoute.address），与首轮同一出口。
+          // 首轮 forwardWithKeyRetry 成功时 route 一定存在，直接复用其 address，无需冗余兜底。
+          const continuationProxyUrl = currentRoute.address;
 
           roundResponse = await forwardToCC(ccBody, apiKey, req.headers, abortController.signal, undefined, continuationProxyUrl);
           if (!roundResponse.ok) {
