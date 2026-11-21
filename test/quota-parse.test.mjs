@@ -514,3 +514,143 @@ test('自动预热：到达 5 小时窗口 resetAtMs 后自动触发预热开窗
   await new Promise(r => setTimeout(r, 10));
   assert.equal(warmups.length, 1, '30分钟内防重复生效');
 });
+
+test('自动预热：resetAt 未知（官方返回 0）的冷账号同样会被开窗', async () => {
+  // 实测结构：窗口尚未开过时 fiveHour.resetAt = 0，解析后 resetAtMs = null。
+  // 只认 resetAtMs 会让这类账号永远等不到自动预热，一起停在「重置时间未知」。
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A, KEY_B]),
+    request: async (o) => {
+      // A 已经开过窗（有 resetAt），B 从未开窗（resetAt = 0）
+      const resetAt = o.keyId === 'a' ? (clock + 3600_000) / 1000 : 0;
+      return {
+        ok: true, status: 200,
+        json: { data: { windowLimits: { fiveHour: { used: 0, cap: 3, exceeded: false, resetAt } } } },
+      };
+    },
+    warmup: async (keyId, opts) => {
+      warmups.push({ keyId, t: clock, ...opts });
+      return { ok: true, model: 'claude-haiku' };
+    },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true }),
+  });
+
+  await svc.refreshAll({ reason: 'startup' });
+  assert.equal(svc.list().find(a => a.keyId === 'b').windows.fiveHour.resetAtMs, null, 'fixture：B 的重置时间确实未知');
+
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(warmups.map(w => [w.keyId, w.reason]), [['b', 'auto_open']], '只给冷账号 B 开窗');
+  assert.ok(svc.list().find(a => a.keyId === 'b').runtime.lastWarmedAt, 'B 必须记录开窗时间');
+
+  // B 开窗后官方仍不给 resetAt：30 分钟防抖过后也不能每轮都打上游
+  clock += 45 * 60 * 1000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  const bWarmups = () => warmups.filter(w => w.keyId === 'b');
+  assert.equal(bWarmups().length, 1, '5 小时窗口寿命内不重复开窗');
+
+  // 超过 5 小时窗口寿命 → 兜底开下一轮（线上每 5 分钟采集一次，快照始终新鲜）
+  clock += 5 * 3600_000;
+  await svc.refreshAll({ reason: 'timer' });
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(bWarmups().length, 2);
+});
+
+test('自动预热：多个冷账号同时到期时分轮开窗，不会一起打上游', async () => {
+  // 升级后旧账号都没有 lastWarmedAt：一次性全放出去等于对上游突发。
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const keys = [
+    { id: 'a', key: 'user_a', label: 'A', enabled: true },
+    { id: 'b', key: 'user_b', label: 'B', enabled: true },
+    { id: 'c', key: 'user_c', label: 'C', enabled: true },
+  ];
+  const svc = createQuotaService({
+    keyPool: fakePool(keys),
+    request: async () => ({
+      ok: true, status: 200,
+      json: { data: { windowLimits: { fiveHour: { used: 0, cap: 3, resetAt: 0 } } } },
+    }),
+    warmup: async (keyId, opts) => {
+      warmups.push({ keyId, ...opts });
+      await gate;
+      return { ok: true };
+    },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true }),
+  });
+
+  await svc.refreshAll({ reason: 'startup' });
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 2, '一轮只开两个');
+
+  // 两个都还在飞 → 不追加
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 2);
+
+  release();
+  await new Promise(r => setTimeout(r, 10));
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 3, '剩下的账号在下一轮补上');
+});
+
+test('自动预热：快照过期时冷窗口仍然开窗（采集间隔可能长于过期阈值）', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({
+      ok: true, status: 200,
+      json: { data: { windowLimits: { fiveHour: { used: 0, cap: 3, resetAt: 0 } } } },
+    }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaStaleMs: 60_000 }),
+  });
+
+  await svc.refreshOne('a');
+  // 让快照过期（此后没有成功采集）——冷窗口不会因为数据过期自己打开
+  clock += 10 * 60_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1, '过期快照同样要开窗');
+
+  // 开窗成功后进入 5 小时兜底周期，不会因为快照仍是旧的而每轮都打
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1);
+});
+
+test('自动预热：窗口已明确耗尽时不开窗（预热解不了限制）', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({
+      ok: true, status: 200,
+      json: { data: { windowLimits: { fiveHour: { used: 3, cap: 3, exceeded: true, resetAt: (clock - 1000) / 1000 } } } },
+    }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true }),
+  });
+
+  await svc.refreshOne('a');
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 0);
+});

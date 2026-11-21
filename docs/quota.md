@@ -60,6 +60,23 @@ Command Code 的套餐额度（尤其是 Go $1 的五小时窗口）是官方口
    **不受**官方快照冲刷（官方统计常滞后），只能等到期或被一次真实成功解除；
 5. 后台可手动「清除运行期封锁」立即恢复（`POST /admin/api/quota/reset`）。
 
+## 4.1 五小时窗口预热（开窗）
+
+开启 `quotaAutoWarmup` 后（默认开启），后台会定期检查并发送一条极轻量请求
+（`max_tokens: 16`）激活 5 小时窗口：
+
+- 官方给了 `resetAt` 且已到点 → 重置后开下一轮（`auto_reset`）；
+- 官方**没给** `resetAt`（实测未开窗时返回 `resetAt: 0`）→ 视为冷账号主动开窗（`auto_open`）。
+  这类账号没有重置时间可等，只认 `resetAt` 会永远停在「重置时间未知」；
+- 开窗后官方仍不给 `resetAt` 时，按 5 小时窗口寿命兜底再开一次，不会每轮都打上游；
+- 同一账号 30 分钟内不重复开窗，失败按指数退避（60s 起，上限 30 分钟）；
+- 窗口已明确耗尽、代理不可用、鉴权失效或限流中都不预热；
+- 冷窗口的开窗判断**不依赖**额度快照是否「过期」——采集间隔可以长于过期阈值，
+  且冷窗口不会因为上次采集失败自己打开；
+- 自动预热并发上限为 2，多个冷账号会分轮开窗。
+
+手动入口：`POST /admin/api/quota/warmup`（`{ id }` 单个，空 body 全部）。
+
 ## 5. 调度优先级
 
 ```
@@ -142,6 +159,7 @@ Anthropic 用 `{type:'error',error:{type:'rate_limit_error'|'overloaded_error',.
 | `quotaStaleMs` | 900000 | 超过即视为过期 |
 | `quotaFallbackCooldownMs` | 300000 | 无官方 resetAt 时的重试窗口 |
 | `quotaForecast` | true | 燃烧预测开关 |
+| `quotaAutoWarmup` | true | 5 小时窗口预热：重置后自动开窗；`resetAt` 未知的冷账号也会主动开窗 |
 | `accountMaxConcurrency` | 0 | 单账号并发上限（0 = 不限） |
 | `crossAccountRetry` | true | 允许安全条件下的当前请求跨账号重试 |
 | `sessionAffinity` | true | 会话粘性总开关 |

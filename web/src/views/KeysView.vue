@@ -613,7 +613,9 @@ onUnmounted(() => {
                     {{ fmtResetTime(fiveHour(k).resetAtMs) }}
                   </div>
                 </div>
-                <div v-else class="text-dim">-</div>
+                <div v-else class="text-dim">
+                  {{ k.quota?.runtime?.lastWarmedAt ? '已开窗待上报' : '未知' }}
+                </div>
                 <div class="text-dim" style="font-size: 11px">{{ quotaFetchedText(k) }}</div>
                 <div v-if="k.quota?.runtime?.lastWarmedAt" class="text-dim" style="font-size: 11px">
                   🔥 预热于 {{ fmtDateTime(k.quota.runtime.lastWarmedAt) }}

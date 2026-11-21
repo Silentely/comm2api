@@ -82,9 +82,13 @@ function qResetLeft(w) {
   return sec > 0 ? sec : 0
 }
 
-function qResetText(w) {
+function qResetText(w, warmedAt = null) {
   const sec = qResetLeft(w)
-  if (sec === null) return '重置时间未知'
+  if (sec === null) {
+    // 官方对尚未开窗的窗口返回 resetAt=0；已经预热过就说明窗口已开，
+    // 只是官方还没上报重置时间 —— 不要显示得和「从未预热」一样。
+    return warmedAt ? '已预热开窗，等待官方上报重置时间' : '重置时间未知'
+  }
   const timeStr = w.resetAtMs ? fmtResetTime(w.resetAtMs) : ""
   if (sec <= 0) return timeStr ? `已到重置时间（${timeStr}）` : '已到重置时间（等待重新确认）'
   const h = Math.floor(sec / 3600)
@@ -424,7 +428,7 @@ onMounted(() => {
                   {{ name === 'fiveHour' ? '五小时窗口' : name === 'weekly' ? '周窗口' : '月度 / 订阅窗口' }}
                   <span class="text-dim">· {{ qText(qWindow(acc, name)) }}</span>
                 </span>
-                <span class="text-dim">{{ qResetText(qWindow(acc, name)) }}</span>
+                <span class="text-dim">{{ qResetText(qWindow(acc, name), name === 'fiveHour' ? acc.runtime?.lastWarmedAt : null) }}</span>
               </div>
               <div class="quota-bar">
                 <div
