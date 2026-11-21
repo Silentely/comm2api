@@ -415,3 +415,39 @@ test('前端测试: 真实挂载 ProxiesView 组件渲染，咬住变异（显�
   ]);
   assert.equal(/⚠️ 2 Key 共用/.test(htmlMutant), false, '模板显示值写死为 0 时正常判据必须失效变红');
 });
+
+// ── M5: bind 模式在空池与纯 #pool 时必须可用，不套用 strict_bind 的拒绝策略 ──
+
+test('M5: bind 模式在空池与纯 #pool 时必须可用，不套用 strict_bind 的拒绝策略', () => {
+  // Case A: 空池时，bind 模式自动兜底至 direct，正常可用
+  const emptyPool = createCleanPool({ keys: ['user_bind_empty'] });
+  const fpEmpty = emptyPool.fingerprintForKey('user_bind_empty');
+  const rEmpty = emptyPool.setBinding(fpEmpty, 'bind');
+  assert.equal(rEmpty.ok, true, '空池时 bind 模式必须成功（200），不被错误拒绝');
+  const directId = proxyFingerprint('direct');
+  assert.equal(rEmpty.proxyId, directId, '空池时 bind 模式落点为 direct');
+
+  // 实跑 routeFor 确认正常产出 direct 出口路由
+  const routeEmpty = emptyPool.routeFor('user_bind_empty');
+  assert.equal(routeEmpty.available, true, '空池 bind 路由必须可用');
+  assert.equal(routeEmpty.address, 'direct', '空池 bind 路由出口为 direct');
+
+  // Case B: 纯 #pool 时，bind 模式自动兜底至 #pool，正常可用且绝不报错「代理池为空」
+  const poolOnly = createCleanPool({ keys: ['user_bind_pool'] });
+  const pOnly = poolOnly.add(`http://127.0.0.1:${portSeq++}#pool`);
+  const fpPool = poolOnly.fingerprintForKey('user_bind_pool');
+  const rPool = poolOnly.setBinding(fpPool, 'bind');
+  assert.equal(rPool.ok, true, '纯 #pool 时 bind 模式必须成功，不被错误拒绝');
+  assert.equal(rPool.proxyId, pOnly.entry.id, '纯 #pool 时 bind 模式落点为该轮换池');
+
+  // 实跑 routeFor 确认正常产出轮换池出口路由
+  const routePool = poolOnly.routeFor('user_bind_pool');
+  assert.equal(routePool.available, true, '纯 #pool bind 路由必须可用');
+  assert.equal(routePool.address, pOnly.entry.value.replace(/#pool$/, ''), '纯 #pool bind 路由出口为轮换池地址');
+
+  // 对照组：strict_bind 在同样场景下必须被严格拒绝
+  const rStrictEmpty = emptyPool.setBinding(fpEmpty, 'strict_bind');
+  assert.equal(rStrictEmpty.ok, false, '空池 strict_bind 仍必须被拒绝');
+  const rStrictPool = poolOnly.setBinding(fpPool, 'strict_bind');
+  assert.equal(rStrictPool.ok, false, '纯 #pool strict_bind 仍必须被拒绝');
+});
