@@ -332,7 +332,9 @@ onMounted(() => {
         </div>
         <div class="hint" style="margin-top: 0; margin-bottom: 14px">
           警戒阈值是<strong>软阈值</strong>：到 90% 只降低优先级，不封禁；真正的封禁只看官方是否明确耗尽。
-          单账号并发上限填 0 表示不限。
+          额度感知策略的选择顺序：<strong>五小时窗口剩余 → 周剩余 → 月剩余</strong>，
+          同档内优先空闲、较久未用的账号，避免并发把单个 Key 打爆。
+          单账号并发上限填 0 表示不限（多账号建议设 2~4）。
         </div>
 
         <div class="form-row">

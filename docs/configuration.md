@@ -45,7 +45,7 @@
 | `projectSlug` | `cc-proxy` | 字符串 | 请求头 `x-project-slug` 取值 |
 | `proxyKey` | `""` | 字符串 | 数据面访问口令。**非空即启用严格鉴权**：客户端只认它，上游凭证从 Key 池按策略选取 |
 | `apiKey` | `""` | 字符串/数组 | 上游 CC API Key（`user_` 开头）。推荐改在后台 `/admin/` 动态添加；此处填写的 Key 会作为**只读**条目出现在后台 |
-| `strategy` | `round_robin` | 字符串 | Key 轮询策略：`round_robin`（轮询）/ `random`（避让连续重复）/ `fill`（压满首个可用） |
+| `strategy` | `round_robin` | 字符串 | Key 轮询策略：`round_robin`（轮询）/ `random`（避让连续重复）/ `fill`（压满首个可用）/ `quota_aware`（按官方额度排序）/ `quota_sticky`（额度排序 + 会话粘性）。后两种见 [quota.md](quota.md) |
 | `defaultModel` | `""` | 字符串 | 默认模型（Key 测试与模型测试使用）；空则默认取目录第一项 |
 | `logFile` | `""` | 字符串 | 日志文件路径（留空则只输出到控制台 stdout） |
 | `logLevel` | `info` | 字符串 | 日志级别：`debug` / `info` / `warn` / `error` |

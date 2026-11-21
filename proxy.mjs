@@ -29,7 +29,7 @@ import { createModelState } from './lib/model-state.mjs';
 import { createAdminApi } from './lib/admin-api.mjs';
 // 额度感知调度相关的四个模块（全部可独立关闭：关掉就等于升级前的行为）
 import { createQuotaService } from './lib/quota.mjs';
-import { unavailabilitySummary, retryAfterSecFor, rankAccount, worstRatio } from './lib/quota-policy.mjs';
+import { unavailabilitySummary, retryAfterSecFor, rankAccount } from './lib/quota-policy.mjs';
 import { createSessionAffinity, resolveSessionId } from './lib/session-affinity.mjs';
 import { createAlerter } from './lib/alerts.mjs';
 import { createUsageAnalytics } from './lib/usage-analytics.mjs';
@@ -126,6 +126,17 @@ function quotaRoutingEnabled() {
   return CFG.strategy === 'quota_aware' || CFG.strategy === 'quota_sticky';
 }
 
+/** 最近一次成功/失败使用的时间；从未用过返回 0（同分时先摊开流量）。 */
+function lastUsedMsOf(keyId) {
+  try {
+    const s = keyPool.statsOf(keyId);
+    const at = s?.lastUsedAt ? Date.parse(s.lastUsedAt) : NaN;
+    return Number.isFinite(at) ? at : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * 额度感知调度器。返回 null 表示「交回内置策略」（round_robin / random / fill）。
  *
@@ -133,6 +144,9 @@ function quotaRoutingEnabled() {
  *   账号可用性（已被 blockReason 滤掉） > 严格代理隔离（同上） > 会话粘性 > 负载均衡
  * 粘性只是**偏好**：绑定的账号不在候选池里（额度耗尽、代理挂、被禁用）时，
  * 这里会自然选到别的账号，并把映射改写到新账号 —— 这正是需求里的自动迁移。
+ *
+ * 排序口径见 rankAccount：剩余额度按 5 小时 → 周 → 月加权，同档内让出位置给
+ * 在途更少、更久没用过的账号，避免并发把单个 Key 打爆。
  */
 function scheduleAccount({ pool, ctx }) {
   if (!quotaRoutingEnabled() || pool.length === 0) return null;
@@ -154,10 +168,29 @@ function scheduleAccount({ pool, ctx }) {
   }
 
   let best = null;
+  // 同分窗口：额度分已按 5% 档位量化，这里只在真正同档时用「更久没用过」摊开流量。
+  // 0.005 小于月窗口一档（约 0.015 分），所以周/月的真实余量差仍能决定顺序。
+  const TIE_EPS = 0.005;
+  const scored = [];
   for (const e of pool) {
     const st = quotaService.stateOf(e.id);
-    const score = rankAccount({ state: st.state, ratio: worstRatio(quotaService.raw.accounts[e.id] || null) });
-    if (!best || score < best.score - 1e-9) best = { entry: e, score, state: st.state };
+    const snapshot = quotaService.raw.accounts[e.id] || null;
+    const inflight = typeof keyPool.inFlightOf === 'function' ? keyPool.inFlightOf(e.id) : 0;
+    let forecast = null;
+    try { forecast = quotaService.forecastOf(e.id); } catch { forecast = null; }
+    const score = rankAccount({ state: st.state, snapshot, inflight, forecast });
+    scored.push({ entry: e, score, state: st.state, inflight, lastUsedAtMs: lastUsedMsOf(e.id) });
+  }
+  if (scored.length > 0) {
+    const min = Math.min(...scored.map(s => s.score));
+    best = scored
+      .filter(s => s.score <= min + TIE_EPS)
+      .reduce((cur, s) => {
+        if (!cur) return s;
+        if (s.inflight !== cur.inflight) return s.inflight < cur.inflight ? s : cur;
+        // 从未用过的账号视为最早使用，先摊开流量
+        return s.lastUsedAtMs < cur.lastUsedAtMs ? s : cur;
+      }, null);
   }
   if (!best) return null;
 
@@ -312,6 +345,24 @@ function noteUpstreamStatus(status) {
 }
 
 /**
+ * 单账号在途计数：请求结束时释放（finish/close 只释放一次）。
+ * 计数本身与策略无关 —— accountMaxConcurrency 限制、额度调度的「空闲优先」
+ * 都依赖它；上限是否生效只取决于配置值是否 > 0。
+ */
+function trackAccountInflight(res, key) {
+  if (!key || !res || typeof res.once !== 'function') return;
+  keyPool.beginRequest(key);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    keyPool.endRequest(key);
+  };
+  res.once('finish', release);
+  res.once('close', release);
+}
+
+/**
  * 请求级账号选定（三个协议共用）。
  *
  * 为什么必须等到这里才选：会话键要从**客户端提供的**标识里取，
@@ -322,6 +373,7 @@ function selectAccountForRequest(auth, { headers = {}, promptCacheKey = null, re
   const namespace = sessionNamespace(auth);
   const clientSession = resolveSessionId(headers, promptCacheKey, namespace);
   if (!quotaRoutingEnabled()) {
+    trackAccountInflight(res, auth.upstreamKey);
     return { key: auth.upstreamKey, keyId: auth.accountKeyId, sessionKey: clientSession.id, namespace, error: null };
   }
   const refined = refineAccount(auth, { sessionKey: clientSession.id, namespace });
@@ -336,21 +388,8 @@ function selectAccountForRequest(auth, { headers = {}, promptCacheKey = null, re
     });
   }
 
-  // 单账号并发上限：在途计数挂在响应对象上，请求结束时释放（只记一次）。
-  // 只用于「尽量不把同一个账号压满」，不是精确配额器。
-  const maxConc = Number(CFG.accountMaxConcurrency) || 0;
-  if (maxConc > 0 && res && typeof res.once === 'function') {
-    const accountKey = refined.upstreamKey;
-    keyPool.beginRequest(accountKey);
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      keyPool.endRequest(accountKey);
-    };
-    res.once('finish', release);
-    res.once('close', release);
-  }
+  // 即使用户没设 accountMaxConcurrency 也照记：额度调度的「空闲优先」要靠它分摊流量。
+  trackAccountInflight(res, refined.upstreamKey);
 
   return {
     key: refined.upstreamKey, keyId: refined.accountKeyId,

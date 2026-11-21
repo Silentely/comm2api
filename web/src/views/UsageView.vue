@@ -58,6 +58,28 @@ async function refreshQuota(keyId) {
   }
 }
 
+// 按额度感知的排序分展示：五小时剩余 → 周剩余 → 月剩余。
+// 实际派发还会参考在途请求、燃烧预测与会话粘性，这里只给管理员一个直观顺序。
+const rankedAccounts = computed(() => {
+  const list = quota.value?.accounts || []
+  return [...list].sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER))
+})
+
+// 优先级只对当前可派发的账号编号；被硬封锁的账号不占号。
+const priorityIndex = computed(() => {
+  const map = new Map()
+  let n = 0
+  for (const acc of rankedAccounts.value) {
+    if (!acc.blockReason) map.set(acc.keyId, ++n)
+  }
+  return map
+})
+
+function rankTitle(acc) {
+  const pct = Math.round((acc.remainingScore ?? 0) * 100)
+  return `额度感知排序：五小时剩余 → 周剩余 → 月剩余；剩余加权分 ${pct}%；同档内还会参考在途请求与会话粘性`
+}
+
 function qWindow(acc, name) {
   return (acc && acc.windows && acc.windows[name]) || null
 }
@@ -392,11 +414,18 @@ onMounted(() => {
               · 可用 <strong>{{ quota.summary.usable }}</strong> / {{ quota.summary.total }}
               · 耗尽 {{ quota.summary.exhausted }}
             </template>
+            <template v-if="quota.quotaRouting"> · 下列顺序按额度剩余排序（实际派发还会参考会话粘性与在途请求）</template>
           </div>
 
-          <div v-for="acc in quota.accounts" :key="acc.keyId" class="result-box" style="margin-bottom: 12px">
+          <div v-for="acc in rankedAccounts" :key="acc.keyId" class="result-box" style="margin-bottom: 12px">
             <div class="title" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
               <span class="badge" :class="quoteStateTone(acc)">{{ quotaStateText(acc) }}</span>
+              <span
+                v-if="quota.quotaRouting && !acc.blockReason"
+                class="badge"
+                :class="priorityIndex.get(acc.keyId) === 1 ? 'ok' : 'muted'"
+                :title="rankTitle(acc)"
+              >优先 #{{ priorityIndex.get(acc.keyId) }}</span>
               <span>{{ acc.label || acc.keyMasked || acc.keyId }}</span>
               <span class="text-dim" style="font-size: 12px">{{ acc.plan || '套餐未知' }}</span>
               <button

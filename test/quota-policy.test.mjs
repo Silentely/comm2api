@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  deriveAccountState, isHardBlocked, rankAccount, worstRatio,
+  deriveAccountState, isHardBlocked, rankAccount, worstRatio, remainingRatio, quotaRemainingScore,
   retryAfterSecFor, unavailabilitySummary, windowExhausted, POLICY_DEFAULTS,
 } from '../lib/quota-policy.mjs';
 
@@ -138,9 +138,105 @@ test('排序：可用 < 接近上限 < 未知，且同档内用量低的优先',
   assert.ok(warn < unknown, '未知额度排最后');
 });
 
+test('排序：五小时剩余额度优先于周/月（短窗口不能被周月余量挤下去）', () => {
+  // A 五小时快满了、周很空；B 五小时很空、周快满了。按需求必须先看五小时 → B。
+  const a = snap({ fiveHour: { used: 80, cap: 100 }, weekly: { used: 10, cap: 100 } });
+  const b = snap({ fiveHour: { used: 20, cap: 100 }, weekly: { used: 80, cap: 100 } });
+  const sa = rankAccount({ state: 'available', snapshot: a });
+  const sb = rankAccount({ state: 'available', snapshot: b });
+  assert.ok(sb < sa, '五小时剩余多的账号优先，哪怕周窗口更紧张');
+});
+
+test('排序：五小时相同时按周剩余，再按月剩余', () => {
+  const freshWeek = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 10, cap: 100 }, monthly: { used: 50, cap: 100 } });
+  const tightWeek = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 90, cap: 100 }, monthly: { used: 10, cap: 100 } });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: freshWeek }) < rankAccount({ state: 'available', snapshot: tightWeek }),
+    '五小时相同 → 周剩余多的优先',
+  );
+
+  const freshMonth = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 50, cap: 100 }, monthly: { used: 10, cap: 100 } });
+  const tightMonth = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 50, cap: 100 }, monthly: { used: 90, cap: 100 } });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: freshMonth }) < rankAccount({ state: 'available', snapshot: tightMonth }),
+    '五小时、周都相同 → 月剩余多的优先',
+  );
+});
+
+test('排序：窗口缺失按中性处理，不会因为缺数据被排到最前或最后', () => {
+  const healthy = snap({ fiveHour: { used: 10, cap: 100 }, weekly: { used: 10, cap: 100 }, monthly: { used: 10, cap: 100 } });
+  const onlyFive = snap({ fiveHour: { used: 10, cap: 100 } });
+  const missingFive = snap({ weekly: { used: 10, cap: 100 } });
+  const tight = snap({ fiveHour: { used: 90, cap: 100 }, weekly: { used: 90, cap: 100 }, monthly: { used: 90, cap: 100 } });
+
+  const s = o => rankAccount({ state: 'available', snapshot: o });
+  // 有真实五小时余量的账号 > 五小时未知（中性 0.5）> 五小时明确紧张
+  assert.ok(s(healthy) < s(onlyFive), '五小时真实余量足 → 排最前');
+  assert.ok(s(onlyFive) < s(missingFive), '五小时未知不等于余量足，排在已知充足之后');
+  assert.ok(s(missingFive) < s(tight), '五小时未知也不等于已用完，排在明确紧张之前');
+});
+
+test('排序：同档内优先空闲账号，避免并发把单个 Key 打爆', () => {
+  const s = snap({ fiveHour: { used: 10, cap: 100 }, weekly: { used: 10, cap: 100 } });
+  const idle = rankAccount({ state: 'available', snapshot: s, inflight: 0 });
+  const busy = rankAccount({ state: 'available', snapshot: s, inflight: 2 });
+  assert.ok(idle < busy, '在途请求多的账号往后排');
+});
+
+test('排序：预测会在重置前烧完的账号往后放', () => {
+  const s = snap({ fiveHour: { used: 10, cap: 100 } });
+  const ok = rankAccount({ state: 'available', snapshot: s, forecast: { status: 'ok', willExhaustBeforeReset: false } });
+  const burning = rankAccount({ state: 'available', snapshot: s, forecast: { status: 'ok', willExhaustBeforeReset: true } });
+  const unknown = rankAccount({ state: 'available', snapshot: s, forecast: { status: 'unknown' } });
+  assert.ok(ok < burning, '预计撑不到重置的账号降权');
+  assert.equal(unknown, ok, '预测未知不改变排序');
+});
+
 test('worstRatio：取所有窗口里最紧张的那个', () => {
   assert.equal(worstRatio(snap({ fiveHour: { used: 10, cap: 100 }, weekly: { used: 400, cap: 500 } })), 0.8);
   assert.equal(worstRatio(snap({})), null);
+});
+
+test('剩余比例：官方只给 percentUsed 时也要参与排序', () => {
+  // 部分端点只回百分比，没有 used/cap —— 不能当成「未知」中性处理。
+  assert.equal(remainingRatio({ percentUsed: 0.25 }), 0.75);
+  assert.equal(remainingRatio({ used: 75, cap: 100 }), 0.25);
+  // percentUsed 与 used/cap 都在时，两者等价
+  assert.equal(remainingRatio({ used: 25, cap: 100, percentUsed: 0.25 }), 0.75);
+  assert.equal(remainingRatio({}), null);
+  assert.equal(remainingRatio({ used: 5, cap: 0 }), null);
+
+  const percentOnly = snap({ fiveHour: { percentUsed: 0.95 } });
+  const known = snap({ fiveHour: { used: 50, cap: 100 } });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: known }) < rankAccount({ state: 'available', snapshot: percentOnly }),
+    '只给百分比的紧张窗口不能排到已知宽松的账号前面',
+  );
+  // 五小时已用满、周/月未知 → 低于「全部未知」的中性 0.5
+  assert.ok(quotaRemainingScore(snap({ fiveHour: { percentUsed: 1 } })) < 0.5);
+  assert.equal(quotaRemainingScore(snap({})), 0.5, '全部缺失时就是中性值');
+});
+
+test('排序：五小时多一档永远压过周 + 月的全部余量（不再被加权平均翻盘）', () => {
+  // 旧版加权平均会在这里倒挂：B 的周五满，把五小时 5 个百分点的差距翻了过来。
+  const a = snap({ fiveHour: { used: 45, cap: 100 }, weekly: { used: 100, cap: 100 }, monthly: { used: 100, cap: 100 } });
+  const b = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 0, cap: 100 }, monthly: { used: 0, cap: 100 } });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: a }) < rankAccount({ state: 'available', snapshot: b }),
+    '五小时剩余更多的账号必须先被选中',
+  );
+});
+
+test('排序：负载与预测只会同档微调，不能跨过状态档', () => {
+  const s = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 50, cap: 100 } });
+  const worstAvailable = rankAccount({
+    state: 'available', snapshot: s, inflight: 100,
+    forecast: { status: 'ok', willExhaustBeforeReset: true },
+  });
+  const bestWarning = rankAccount({ state: 'quota_warning', snapshot: s });
+  const bestUnknown = rankAccount({ state: 'quota_unknown', snapshot: s });
+  assert.ok(worstAvailable < bestWarning, '可用档再忙也要排在警戒档之前');
+  assert.ok(bestWarning < bestUnknown, '警戒档排在未知档之前');
 });
 
 test('Retry-After：全部额度耗尽时按最早的官方重置时间计算，并有界', () => {

@@ -68,18 +68,16 @@ async function startQuotaUpstream(ctl) {
       if (req.url.includes('/alpha/usage/summary')) {
         if (ctl.quotaDown) return json(500, { error: { message: 'quota api down' } });
         const w = ctl.windows[key] || {};
-        return json(200, {
-          data: {
-            windowLimits: {
-              fiveHour: {
-                used: w.used ?? 0,
-                cap: w.cap ?? 100,
-                exceeded: !!w.exceeded,
-                resetAt: w.resetAt ?? Date.now() + 3600_000,
-              },
-            },
-          },
+        const win = (spec, fallbackCap) => ({
+          used: spec?.used ?? 0,
+          cap: spec?.cap ?? fallbackCap,
+          exceeded: !!spec?.exceeded,
+          resetAt: spec?.resetAt ?? Date.now() + 3600_000,
         });
+        const windowLimits = { fiveHour: win(w, 100) };
+        if (w.weekly) windowLimits.weekly = win(w.weekly, 600);
+        if (w.monthly) windowLimits.monthly = win(w.monthly, 1000);
+        return json(200, { data: { windowLimits } });
       }
 
       if (req.url.includes('/alpha/generate')) {
@@ -91,9 +89,15 @@ async function startQuotaUpstream(ctl) {
           res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '7' });
           return res.end(JSON.stringify({ error: { code: 'RATE_LIMITED', message: 'too many requests' } }));
         }
-        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        for (const line of NDJSON_OK) res.write(line + '\n');
-        return res.end();
+        const sendOk = () => {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          for (const line of NDJSON_OK) res.write(line + '\n');
+          res.end();
+        };
+        // ctl.delay[key] 毫秒：让请求在上游停留一段时间，用来验证并发上限。
+        const delayMs = Number(ctl.delay?.[key]) || 0;
+        if (delayMs > 0) { setTimeout(sendOk, delayMs); return; }
+        return sendOk();
       }
 
       return json(404, { error: { message: 'unknown route' } });
@@ -176,6 +180,83 @@ test('A 五小时额度已满、B 正常：后续新请求全部走 B（不会�
     // 额度查询也必须是按账号、按各自代理发出的
     const quotaCalls = mock.seen.filter(s => s.url.includes('/alpha/usage/summary'));
     assert.ok(quotaCalls.some(s => s.key === KEY_A), '启动时应当查过 A 的官方额度');
+  } finally {
+    await proxy.kill();
+    await mock.close();
+  }
+});
+
+test('多 Key 调度：五小时剩余优先于周/月，并把流量分摊到同档账号', async () => {
+  const KEY_C = 'user_ccc3333333333333333333333333';
+  const ctl = {
+    windows: {
+      // A：五小时快满了，但周很空 —— 不能因为周余量多就优先它
+      [KEY_A]: { used: 80, cap: 100, weekly: { used: 10, cap: 100 } },
+      // B / C：五小时充足，周较紧张；两个账号同档，应该在它们之间分摊
+      [KEY_B]: { used: 20, cap: 100, weekly: { used: 80, cap: 100 } },
+      [KEY_C]: { used: 20, cap: 100, weekly: { used: 80, cap: 100 } },
+    },
+    generate: {},
+  };
+  const mock = await startQuotaUpstream(ctl);
+  const workdir = workdirWith({
+    apiKey: [KEY_A, KEY_B, KEY_C],
+    strategy: 'quota_aware',
+    quotaRefreshIntervalMs: 60_000,
+  });
+  const proxy = await startProxy({ upstreamPort: mock.port, cwd: workdir });
+  try {
+    await sleep(2600);
+    for (let i = 0; i < 4; i++) {
+      const r = await proxy.post('/v1/chat/completions', CHAT_BODY(), AUTH);
+      assert.equal(r.status, 200);
+      await r.text();
+    }
+
+    const gens = mock.generates();
+    assert.equal(gens.length, 4);
+    assert.equal(gens.filter(g => g.key === KEY_A).length, 0, '五小时剩余更少的账号不应被优先选中');
+    const usedB = gens.filter(g => g.key === KEY_B).length;
+    const usedC = gens.filter(g => g.key === KEY_C).length;
+    assert.ok(usedB > 0 && usedC > 0, `同档账号应分摊流量（B=${usedB} C=${usedC}）`);
+  } finally {
+    await proxy.kill();
+    await mock.close();
+  }
+});
+
+test('内置策略也遵守单账号并发上限（在途计数不依赖额度策略）', async () => {
+  const ctl = {
+    windows: {
+      [KEY_A]: { used: 10, cap: 100 },
+      [KEY_B]: { used: 10, cap: 100 },
+    },
+    generate: {},
+    // A 的上游响应挂住 600ms，制造「A 仍在途」的窗口
+    delay: { [KEY_A]: 600 },
+  };
+  const mock = await startQuotaUpstream(ctl);
+  const workdir = workdirWith({
+    apiKey: [KEY_A, KEY_B],
+    strategy: 'fill',           // 内置策略：默认永远压满第一个可用账号
+    accountMaxConcurrency: 1,
+    quotaRefreshIntervalMs: 60_000,
+  });
+  const proxy = await startProxy({ upstreamPort: mock.port, cwd: workdir });
+  try {
+    await sleep(2600);
+    const [r1, r2] = await Promise.all([
+      proxy.post('/v1/chat/completions', CHAT_BODY(), AUTH),
+      proxy.post('/v1/chat/completions', CHAT_BODY(), AUTH),
+    ]);
+    assert.equal(r1.status, 200);
+    assert.equal(r2.status, 200);
+    await Promise.all([r1.text(), r2.text()]);
+
+    const gens = mock.generates();
+    assert.equal(gens.length, 2);
+    const keys = [...new Set(gens.map(g => g.key))].sort();
+    assert.deepEqual(keys, [KEY_A, KEY_B].sort(), '第二个并发请求应避开已达到并发上限的 A');
   } finally {
     await proxy.kill();
     await mock.close();

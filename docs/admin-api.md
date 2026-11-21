@@ -612,7 +612,8 @@ Key 列表项（下称 `KeyItem`）：
     "state": "quota_exhausted", "stateLabel": "官方额度窗口已耗尽（fiveHour）",
     "stateUntil": "2026-11-20T10:00:00.000Z",
     "blockReason": { "state": "quota_exhausted", "reason": "…", "untilMs": 1763603600000 },
-    "ratio": 1, "fetchedAt": "2026-11-20T09:00:00.000Z", "fetchedAtMs": 1763600000000,
+    "ratio": 1, "remainingScore": 0.05, "inflightRequests": 0,
+    "rank": 10285.4, "fetchedAt": "2026-11-20T09:00:00.000Z", "fetchedAtMs": 1763600000000,
     "stale": false, "partial": [], "unsupported": [], "refreshing": false,
     "forecast": { "status": "ok", "window": "fiveHour", "burnPerHour": 120,
                   "remaining": 0, "etaAt": "2026-11-20T10:00:00.000Z",
@@ -634,7 +635,11 @@ Key 列表项（下称 `KeyItem`）：
 - `windows` 里**只有官方返回的窗口**；字段缺失时值为 `null`（`partial: true`），不是 `0`；
 - `stale: true` 表示数据过期，前端必须显示「不是实时值」；
 - `partial` 是这次没拿到的接口名，`unsupported` 是上游明确 404/405 的端点；
-- `runtime.lastFailure` 是上次刷新失败的原因（`errors` 按端点列出）。
+- `runtime.lastFailure` 是上次刷新失败的原因（`errors` 按端点列出）；
+- `remainingScore` 是多窗口剩余额度的加权分（1 = 全新；剩余比例按 5% 分档，
+  五小时权重 300、周 8、月 0.3，保证短窗口优先）；
+  `rank` 是调度排序分（越小越优先，已含 `inflightRequests` 与燃烧预测）；
+  会话粘性命中时实际派发仍以绑定账号为准。
 
 ### `POST /admin/api/quota/refresh` （保护）
 
