@@ -185,6 +185,21 @@ export function fmtRemaining(left) {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
+export const FIVE_HOUR_MS = 5 * 60 * 60 * 1000
+
+/** 预热记录是否仍落在当前 5 小时窗口内；超过 5 小时的旧记录不再当作「已开窗」。 */
+export function isRecentWarm(warmedAt, now = Date.now()) {
+  if (!warmedAt) return false
+  const ms = Date.parse(warmedAt)
+  return Number.isFinite(ms) && now - ms < FIVE_HOUR_MS
+}
+
+/** 预热是否发生在官方重置时间之后，且仍是当前窗口内的记录。 */
+export function isWarmedAfterReset(w, warmedAt, now = Date.now()) {
+  if (!w || !w.resetAtMs || !isRecentWarm(warmedAt, now)) return false
+  return Date.parse(warmedAt) >= w.resetAtMs
+}
+
 export function fmtDurationMs(ms) {
   if (isMissing(ms)) return MISSING
   const num = Number(ms)

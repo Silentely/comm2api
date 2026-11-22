@@ -1355,9 +1355,12 @@ async function warmupKey(keyId, { reason = 'manual' } = {}) {
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       if (response.status === 401) {
-        quotaService.markAuthInvalid(keyId, '预热鉴权失败 (401)');
+        quotaService.markAuthInvalid(keyId, { reason: '预热鉴权失败 (401)' });
       } else if (response.status === 429) {
-        quotaService.markRateLimited(keyId, '预热触发限流 (429)');
+        quotaService.markRateLimited(keyId, {
+          retryAfterMs: parseRetryAfterMs(response.headers),
+          reason: '预热触发限流 (429)',
+        });
       }
       try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
       throw new Error(`上游响应异常 (HTTP ${response.status}): ${summarizeUpstreamError(body, 200) || response.statusText}`);

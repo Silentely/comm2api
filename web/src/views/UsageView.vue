@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { loadStats } from '../store'
 import { toast } from '../toast'
-import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtResetTime, fmtTokens } from '../utils'
+import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtResetTime, fmtTokens, isRecentWarm, isWarmedAfterReset } from '../utils'
 import StatCard from '../components/StatCard.vue'
 
 const data = ref(null)
@@ -108,11 +108,19 @@ function qResetText(w, warmedAt = null) {
   const sec = qResetLeft(w)
   if (sec === null) {
     // 官方对尚未开窗的窗口返回 resetAt=0；已经预热过就说明窗口已开，
-    // 只是官方还没上报重置时间 —— 不要显示得和「从未预热」一样。
-    return warmedAt ? '已预热开窗，等待官方上报重置时间' : '重置时间未知'
+    // 只是官方还没上报重置时间。超过 5 小时的旧预热记录不再当作当前窗口。
+    if (!warmedAt) return '重置时间未知'
+    return isRecentWarm(warmedAt)
+      ? '已预热开窗，等待官方上报重置时间'
+      : '重置时间未知（上次预热已超过 5 小时）'
   }
   const timeStr = w.resetAtMs ? fmtResetTime(w.resetAtMs) : ""
-  if (sec <= 0) return timeStr ? `已到重置时间（${timeStr}）` : '已到重置时间（等待重新确认）'
+  if (sec <= 0) {
+    if (isWarmedAfterReset(w, warmedAt)) {
+      return `已预热开窗（${fmtDateTime(warmedAt)}），等待官方刷新数据`
+    }
+    return timeStr ? `已到重置时间（${timeStr}）` : '已到重置时间（等待重新确认）'
+  }
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const countdown = h > 0 ? `${h} 小时 ${m} 分后重置` : `${m} 分后重置`

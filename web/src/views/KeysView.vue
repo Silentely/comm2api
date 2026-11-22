@@ -24,6 +24,8 @@ import {
   fmtRemaining,
   fmtResetTime,
   fmtTokens,
+  isRecentWarm,
+  isWarmedAfterReset,
   remainingSeconds,
   truncate,
 } from '../utils'
@@ -363,6 +365,21 @@ function resetLeft(k) {
   return Math.max(0, Math.round((w.resetAtMs - now.value) / 1000))
 }
 
+function resetPassed(k) {
+  const w = fiveHour(k)
+  return !!w?.resetAtMs && w.resetAtMs <= now.value
+}
+
+function warmLabel(k) {
+  const warmedAt = k.quota?.runtime?.lastWarmedAt
+  if (!warmedAt) return '未知'
+  return isRecentWarm(warmedAt) ? '已开窗待上报' : '预热记录已过期'
+}
+
+function isWarmedNow(k) {
+  return isWarmedAfterReset(fiveHour(k), k.quota?.runtime?.lastWarmedAt, now.value)
+}
+
 function quotaFetchedText(k) {
   const q = quotaOf(k)
   if (!q || !q.fetchedAt) return '尚未采集'
@@ -608,13 +625,14 @@ onUnmounted(() => {
               </td>
               <td>
                 <div v-if="resetLeft(k) !== null">
-                  <div class="mono">{{ resetLeft(k) > 0 ? fmtRemaining(resetLeft(k)) : '即将重置' }}</div>
+                  <div class="mono">{{ resetLeft(k) > 0 ? fmtRemaining(resetLeft(k)) : (isWarmedNow(k) ? '已开窗待上报' : '即将重置') }}</div>
                   <div v-if="fiveHour(k)?.resetAtMs" class="text-dim mono" style="font-size: 11px">
                     {{ fmtResetTime(fiveHour(k).resetAtMs) }}
+                    <span v-if="resetPassed(k)">（官方未刷新）</span>
                   </div>
                 </div>
                 <div v-else class="text-dim">
-                  {{ k.quota?.runtime?.lastWarmedAt ? '已开窗待上报' : '未知' }}
+                  {{ warmLabel(k) }}
                 </div>
                 <div class="text-dim" style="font-size: 11px">{{ quotaFetchedText(k) }}</div>
                 <div v-if="k.quota?.runtime?.lastWarmedAt" class="text-dim" style="font-size: 11px">
