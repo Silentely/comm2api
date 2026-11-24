@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { toast } from '../toast'
 import { fmtDateTime, fmtNum } from '../utils'
+import ClientConfigModal from '../components/ClientConfigModal.vue'
 
 /*
  * 2API Key = 本项目自己签发给**下游客户端**的凭证。
@@ -24,6 +25,12 @@ const busy = reactive({ add: false, rowId: '', revealingId: '', savingId: '' })
 const editing = reactive({ id: '', label: '', enabled: true })
 const revealed = reactive({})
 const justCreated = ref(null)
+
+const clientConfigModal = reactive({
+  visible: false,
+  key: null,
+  plainKey: '',
+})
 
 const enabledCount = computed(() => state.counts.enabled || 0)
 
@@ -51,7 +58,13 @@ async function add() {
       label: form.label.trim() || undefined,
     })
     // 明文只在创建这一次返回，列表始终脱敏
-    justCreated.value = { plainKey: data.plainKey, label: data.key.label, generated: data.generated }
+    justCreated.value = {
+      id: (data && data.key && data.key.id) || '',
+      plainKey: data.plainKey,
+      label: data.key ? data.key.label : '',
+      generated: data.generated,
+      keyMasked: data.key ? data.key.keyMasked : '',
+    }
     form.key = ''
     form.label = ''
     await load()
@@ -95,6 +108,27 @@ async function copy(text, label = '已复制') {
     toast.success(label)
   } catch {
     toast.error('复制失败，请手动选择复制')
+  }
+}
+
+function openClientConfig(k, plainKey = '') {
+  clientConfigModal.key = k
+  clientConfigModal.plainKey = plainKey || (k && k.id ? revealed[k.id] || '' : '')
+  clientConfigModal.visible = true
+}
+
+function closeClientConfigModal() {
+  clientConfigModal.visible = false
+  clientConfigModal.key = null
+  clientConfigModal.plainKey = ''
+}
+
+function onKeyRevealed({ id, key }) {
+  if (id && key) {
+    revealed[id] = key
+    setTimeout(() => {
+      delete revealed[id]
+    }, 10000)
   }
 }
 
@@ -250,10 +284,13 @@ onMounted(load)
             {{ justCreated.label || '（无标签）' }}
             <template v-if="justCreated.generated"> · 系统生成</template>
           </div>
-          <div class="flex" style="gap: 8px; margin-top: 8px; align-items: center">
+          <div class="flex" style="gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap">
             <code class="mono" style="word-break: break-all">{{ justCreated.plainKey }}</code>
             <button class="btn btn-sm" type="button" @click="copy(justCreated.plainKey, '已复制 2API Key')">
               📋 复制
+            </button>
+            <button class="btn btn-sm btn-primary" type="button" @click="openClientConfig(justCreated, justCreated.plainKey)">
+              ⚙️ 一键客户端配置
             </button>
             <button class="btn btn-sm" type="button" @click="justCreated = null">收起</button>
           </div>
@@ -319,6 +356,12 @@ onMounted(load)
                   <button
                     class="btn btn-sm"
                     type="button"
+                    title="一键生成客户端配置（Claude Code / Cursor / OpenCode 等）"
+                    @click="openClientConfig(k)"
+                  >⚙️ 配置客户端</button>
+                  <button
+                    class="btn btn-sm"
+                    type="button"
                     title="显示明文（10 秒后自动隐藏）"
                     :disabled="busy.revealingId === k.id"
                     @click="reveal(k)"
@@ -338,5 +381,14 @@ onMounted(load)
         </table>
       </div>
     </div>
+
+    <!-- 客户端配置弹窗 -->
+    <ClientConfigModal
+      v-if="clientConfigModal.visible && clientConfigModal.key"
+      :api-key="clientConfigModal.key"
+      :initial-plain-key="clientConfigModal.plainKey"
+      @close="closeClientConfigModal"
+      @revealed="onKeyRevealed"
+    />
   </div>
 </template>

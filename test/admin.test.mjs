@@ -1918,3 +1918,56 @@ test('后台接口：/quota/warmup 触发预热且 /quota 返回 autoWarmup 策�
     assert.ok(Array.isArray(wData.results));
   } finally { await s.close(); }
 });
+
+// ── ⑮ Web 管理后台客户端配置生成器 ─────────────────────────
+
+test("Web 前端一键客户端配置生成器：ClientConfigModal 与 ApiKeysView 完备性", async () => {
+  const modalPath = join(REPO, "web/src/components/ClientConfigModal.vue");
+  const viewPath = join(REPO, "web/src/views/ApiKeysView.vue");
+
+  assert.ok(existsSync(modalPath), "ClientConfigModal.vue 必须存在");
+  assert.ok(existsSync(viewPath), "ApiKeysView.vue 必须存在");
+
+  const modalSource = readFileSync(modalPath, "utf-8");
+  const viewSource = readFileSync(viewPath, "utf-8");
+
+  // 1. 客户端预设支持 5 大客户端（Claude Code / Cursor / OpenCode / NextChat / cURL）
+  assert.match(modalSource, /ANTHROPIC_BASE_URL/);
+  assert.match(modalSource, /ANTHROPIC_AUTH_TOKEN/);
+  assert.match(modalSource, /cursorBaseUrl|Override OpenAI Base URL/i);
+  assert.match(modalSource, /opencode\.json/);
+  assert.match(modalSource, /chatgpt-next-web|NextChat/i);
+  assert.match(modalSource, /chat\/completions/);
+  assert.match(modalSource, /v1\/messages/);
+
+  // 2. 剪贴板复制及降级容错
+  assert.match(modalSource, /navigator\.clipboard\.writeText/);
+  assert.match(modalSource, /execCommand/);
+  assert.match(modalSource, /selectBlock/);
+
+  // 3. 凭证安全保护：关闭/卸载清空明文，且无 v-html
+  assert.doesNotMatch(modalSource, /v-html/, "严禁使用 v-html 以免 XSS 风险");
+  assert.match(modalSource, /localPlainKey\.value\s*=\s*['"]/);
+  assert.match(modalSource, /POST.*\/apikeys\/reveal/);
+
+  // 4. ApiKeysView 正确集成 ClientConfigModal 与操作按钮
+  assert.match(viewSource, /ClientConfigModal/);
+  assert.match(viewSource, /配置客户端/);
+
+  // 5. 验证后端 /apikeys/reveal 支持明文揭示供生成器使用
+  const s = await setup({ env: BASE_ENV });
+  try {
+    const api = await authed(s.proxy);
+    const created = await api.post("/apikeys", { label: "客户端测试" });
+    const { key, plainKey } = (await created.json()).data;
+    assert.ok(plainKey.startsWith("ccp_"));
+
+    const revealedRes = await api.post("/apikeys/reveal", { id: key.id });
+    assert.equal(revealedRes.status, 200);
+    const revealedData = (await revealedRes.json()).data;
+    assert.equal(revealedData.key, plainKey);
+  } finally {
+    await s.close();
+  }
+});
+
