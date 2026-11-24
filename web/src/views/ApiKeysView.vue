@@ -151,10 +151,10 @@ onMounted(load)
       <div class="section-title">📖 两套 Key 的区别</div>
       <div class="section-body">
         <div class="table-wrap">
-          <table>
+          <table class="table-wrap-text">
             <thead>
               <tr>
-                <th></th>
+                <th style="width: 112px"></th>
                 <th>上游 Key</th>
                 <th>2API Key（本页）</th>
               </tr>
@@ -315,7 +315,7 @@ onMounted(load)
               <td class="mono">{{ k.lastUsedAt ? fmtDateTime(k.lastUsedAt) : '-' }}</td>
               <td class="mono">{{ fmtDateTime(k.createdAt) }}</td>
               <td>
-                <div class="flex" style="gap: 4px; flex-wrap: wrap">
+                <div class="row-actions">
                   <button
                     class="btn btn-sm"
                     type="button"

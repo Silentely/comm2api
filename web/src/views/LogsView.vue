@@ -18,6 +18,7 @@ const pending = ref([])
 const paused = ref(false)
 const autoScroll = ref(true)
 const levelFilter = ref('all')
+const searchQuery = ref('')
 const connState = ref('connecting')
 const reconnectCount = ref(0)
 const loadingHistory = ref(false)
@@ -25,10 +26,42 @@ const boxRef = ref(null)
 
 let es = null
 let keySeq = 0
+const seenKeys = new Set()
 
-const filtered = computed(() =>
-  levelFilter.value === 'all' ? logs.value : logs.value.filter((l) => (l.level || 'info') === levelFilter.value),
-)
+function entryFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return ''
+  if (entry.id !== undefined && entry.id !== null) return `id:${entry.id}`
+  let dataStr = ''
+  if (entry.data !== undefined && entry.data !== null && entry.data !== '') {
+    try { dataStr = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data) } catch { dataStr = String(entry.data) }
+  }
+  return `${entry.time || ''}|${entry.level || ''}|${entry.msg || entry.message || ''}|${dataStr}`
+}
+
+function rebuildSeen() {
+  seenKeys.clear()
+  for (const item of logs.value) {
+    if (item.__fp) seenKeys.add(item.__fp)
+  }
+  for (const item of pending.value) {
+    if (item.__fp) seenKeys.add(item.__fp)
+  }
+}
+
+const filtered = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  return logs.value.filter((l) => {
+    if (levelFilter.value !== 'all' && (l.level || 'info') !== levelFilter.value) return false
+    if (!q) return true
+    const msg = String(l.msg || l.message || '').toLowerCase()
+    if (msg.includes(q)) return true
+    if (hasData(l)) {
+      const payload = fmtPayload(l.data).toLowerCase()
+      if (payload.includes(q)) return true
+    }
+    return false
+  })
+})
 
 const counts = computed(() => {
   const c = { all: logs.value.length, debug: 0, info: 0, warn: 0, error: 0 }
@@ -52,14 +85,24 @@ function hasData(l) {
 
 function pushEntry(entry) {
   if (!entry || typeof entry !== 'object') return
-  if (!entry.__k) entry.__k = ++keySeq
+  const fp = entryFingerprint(entry)
+  // 去重：GET /logs 历史加载、SSE 建连补发与自动重连都会重放最近日志，避免同一条重复出现
+  if (fp && seenKeys.has(fp)) return
+  const item = { ...entry, __k: ++keySeq, __fp: fp }
+  if (fp) seenKeys.add(fp)
   if (paused.value) {
-    pending.value.unshift(entry)
-    if (pending.value.length > MAX) pending.value.length = MAX
+    pending.value.unshift(item)
+    if (pending.value.length > MAX) {
+      pending.value.length = MAX
+      rebuildSeen()
+    }
     return
   }
-  logs.value.unshift(entry)
-  if (logs.value.length > MAX) logs.value.length = MAX
+  logs.value.unshift(item)
+  if (logs.value.length > MAX) {
+    logs.value.length = MAX
+    rebuildSeen()
+  }
 }
 
 function onMessage(ev) {
@@ -99,16 +142,26 @@ function connect() {
   es.onmessage = onMessage
 }
 
-async function refresh() {
+async function refresh(silent = false) {
   loadingHistory.value = true
   try {
     const params = new URLSearchParams({ limit: '200' })
     if (levelFilter.value !== 'all') params.set('level', levelFilter.value)
     const { data } = await api('GET', `/logs?${params.toString()}`)
     const list = (data && data.logs) || []
-    logs.value = list.map((l) => ({ ...l, __k: ++keySeq })).slice(0, MAX)
+    const next = []
+    const nextSeen = new Set()
+    for (const l of list) {
+      const fp = entryFingerprint(l)
+      if (fp && nextSeen.has(fp)) continue
+      if (fp) nextSeen.add(fp)
+      next.push({ ...l, __k: ++keySeq, __fp: fp })
+      if (next.length >= MAX) break
+    }
+    logs.value = next
     pending.value = []
-    toast.success(`已加载 ${logs.value.length} 条日志`)
+    rebuildSeen()
+    if (!silent) toast.success(`已加载 ${logs.value.length} 条日志`)
   } catch (e) {
     toast.error('加载日志失败：' + e.message)
   } finally {
@@ -121,6 +174,7 @@ function togglePause() {
     if (pending.value.length) {
       logs.value = pending.value.concat(logs.value).slice(0, MAX)
       pending.value = []
+      rebuildSeen()
     }
     paused.value = false
     toast.info('已恢复实时日志')
@@ -133,6 +187,7 @@ function togglePause() {
 function clearLogs() {
   logs.value = []
   pending.value = []
+  seenKeys.clear()
   toast.info('已清空当前日志视图')
 }
 
@@ -149,8 +204,8 @@ watch(
   },
 )
 
-onMounted(() => {
-  refresh()
+onMounted(async () => {
+  await refresh(true)
   connect()
 })
 
@@ -164,10 +219,12 @@ onUnmounted(() => {
     <h2>
       📜 请求日志
       <span class="probe-pill">EventSource 实时流 · 最多保留 500 条 · 最新在前</span>
-      <button class="btn btn-sm" style="margin-left: auto" type="button" :disabled="loadingHistory" @click="refresh">
-        <span v-if="loadingHistory" class="loading"></span>
-        {{ loadingHistory ? '加载中…' : '🔄 刷新' }}
-      </button>
+      <div class="header-actions">
+        <button class="btn btn-sm" type="button" :disabled="loadingHistory" @click="refresh(false)">
+          <span v-if="loadingHistory" class="loading"></span>
+          {{ loadingHistory ? '加载中…' : '🔄 刷新' }}
+        </button>
+      </div>
     </h2>
 
     <div class="section">
@@ -178,16 +235,17 @@ onUnmounted(() => {
           :class="connState === 'open' ? 'ok' : connState === 'connecting' ? 'warn' : 'danger'"
         >{{ connLabel }}</span>
         <span v-if="reconnectCount" class="probe-pill">重连 {{ fmtNum(reconnectCount) }} 次</span>
-        <span class="spacer"></span>
-        <button class="btn btn-sm" type="button" @click="togglePause">
-          {{ paused ? '▶ 继续' : '⏸ 暂停' }}
-        </button>
-        <button class="btn btn-sm" type="button" @click="clearLogs">🧹 清屏</button>
-        <button class="btn btn-sm" type="button" title="重新建立 SSE 连接" @click="connect">🔌 重连</button>
+        <div class="header-actions">
+          <button class="btn btn-sm" type="button" @click="togglePause">
+            {{ paused ? '▶ 继续' : '⏸ 暂停' }}
+          </button>
+          <button class="btn btn-sm" type="button" @click="clearLogs">🧹 清屏</button>
+          <button class="btn btn-sm" type="button" title="重新建立 SSE 连接" @click="connect">🔌 重连</button>
+        </div>
       </div>
 
       <div class="section-body" style="padding-bottom: 0">
-        <div class="justify-between">
+        <div class="justify-between" style="margin-bottom: 10px">
           <div class="tabs" style="border-bottom: none; padding: 0; background: transparent">
             <button
               v-for="lv in LEVELS"
@@ -210,6 +268,17 @@ onUnmounted(() => {
           </label>
         </div>
 
+        <div class="filter-bar">
+          <input
+            v-model="searchQuery"
+            type="search"
+            class="filter-input"
+            placeholder="搜索日志内容或 JSON 字段…"
+          />
+          <button v-if="searchQuery" class="btn btn-sm" type="button" @click="searchQuery = ''">清除筛选</button>
+          <span v-if="searchQuery" class="probe-pill">匹配 {{ fmtNum(filtered.length) }} / {{ fmtNum(logs.length) }} 条</span>
+        </div>
+
         <div v-if="paused" class="hint text-amber">
           ⏸ 已暂停：缓冲 {{ fmtNum(pending.length) }} 条新日志，点击「继续」后合并显示。
         </div>
@@ -218,7 +287,7 @@ onUnmounted(() => {
       <div class="section-body">
         <div ref="boxRef" class="log-box">
           <div v-if="!filtered.length" class="empty">
-            {{ logs.length ? '当前级别下暂无日志' : '暂无日志' }}
+            {{ logs.length ? '当前筛选条件下暂无日志' : '暂无日志' }}
           </div>
           <div v-for="l in filtered" :key="l.__k" class="log-row">
             <span class="log-time">{{ fmtDateTime(l.time) }}</span>

@@ -334,10 +334,11 @@ onMounted(async () => {
       <div class="section-title">📖 这是什么</div>
       <div class="section-body">
         <div class="hint">
-          代理池决定本代理**从哪里出去**访问 Command Code。条目可以是直连、普通 HTTP 代理，
+          代理池决定本代理<strong>从哪里出去</strong>访问 Command Code。条目可以是直连、普通 HTTP 代理，
           或轮换型代理池（<code>pool+http://…</code> 或 <code>http://…#pool</code>：每条新连接换一个出口 IP）。
-          上游 Key 与代理的绑定有三种模式：<strong>自动</strong>（静态分配 + 故障转移）、
-          <strong>固定</strong>（不自动迁移）、<strong>每次轮换</strong>（每次请求换一条健康代理）。
+          上游 Key 与代理的绑定有四种模式：<strong>自动</strong>（静态分配 + 故障转移）、
+          <strong>固定</strong>（优先走指定代理，故障时允许临时转移）、
+          <strong>严格固定</strong>（仅走指定代理，故障时停派不转移）、<strong>每次轮换</strong>（每次请求换一条健康代理）。
         </div>
         <div v-if="state.proxyFileError" class="hint text-danger" style="margin-top: 8px">
           <strong>代理文件读取失败</strong>：<code>{{ state.proxyFile }}</code> —— {{ state.proxyFileError }}
@@ -492,7 +493,7 @@ onMounted(async () => {
                 <template v-else>未检测</template>
               </td>
               <td>
-                <div class="flex" style="gap: 6px; flex-wrap: wrap">
+                <div class="row-actions">
                   <button
                     class="btn btn-sm"
                     type="button"
@@ -570,6 +571,7 @@ onMounted(async () => {
               </td>
               <td>
                 <select
+                  class="select-inline"
                   :value="b.mode"
                   :disabled="!keyIdOf(b) || busy.rowId === keyIdOf(b)"
                   @change="onModeChange(b, $event.target.value)"
@@ -583,6 +585,7 @@ onMounted(async () => {
               <td>
                 <select
                   v-if="b.mode === 'bind' || b.mode === 'strict_bind'"
+                  class="select-inline"
                   :value="b.proxyId"
                   :disabled="busy.rowId === keyIdOf(b)"
                   @change="setBinding(keyIdOf(b), b.mode, $event.target.value)"

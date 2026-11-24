@@ -209,11 +209,19 @@ onMounted(() => {
   <div>
     <h2>
       ⚙️ 设置
-      <span class="probe-pill">写入 data/settings.json（后台设置层，原子替换）</span>
-      <button class="btn btn-sm" style="margin-left: auto" type="button" :disabled="loading" @click="loadConfig">
-        <span v-if="loading" class="loading"></span>
-        {{ loading ? '加载中…' : '🔄 重新加载' }}
-      </button>
+      <span class="probe-pill">
+        {{ config && config.storage && config.storage.mode === 'redis' ? '持久化至 Redis 云端存储（实时生效）' : '写入 data/settings.json（后台设置层，原子替换）' }}
+      </span>
+      <div class="header-actions">
+        <button class="btn btn-sm btn-primary" type="button" :disabled="saving || loading" @click="saveConfig">
+          <span v-if="saving" class="loading"></span>
+          {{ saving ? '保存中…' : '💾 保存配置' }}
+        </button>
+        <button class="btn btn-sm" type="button" :disabled="loading" @click="loadConfig">
+          <span v-if="loading" class="loading"></span>
+          {{ loading ? '加载中…' : '🔄 重新加载' }}
+        </button>
+      </div>
     </h2>
 
     <div v-if="error" class="result-box result-box-danger">
@@ -240,8 +248,8 @@ onMounted(() => {
           </div>
         </div>
         <div class="hint" style="margin-bottom: 10px">
-          「仪表盘 → 上游连通性测试」的模型下拉会**自动预选**这里设置的模型；
-          你仍然可以在下拉里临时选别的模型来测。未设置时取第一个**启用**的模型。
+          「仪表盘 → 上游连通性测试」的模型下拉会<strong>自动预选</strong>这里设置的模型；
+          你仍然可以在下拉里临时选别的模型来测。未设置时取第一个<strong>启用</strong>的模型。
           另外，客户端调用 <code>/v1/*</code> 时如果没有指定 <code>model</code>，也会用它作为兜底。
         </div>
 
@@ -404,6 +412,12 @@ onMounted(() => {
           5小时窗口预热：窗口到期重置后自动发送极小请求激活下一轮 5 小时计时；尚未开窗（重置时间未知）的账号也会主动开窗。<br />
           跨账号重试只在「下游尚未收到任何内容」时生效；已输出 SSE / 工具调用后绝不重放。
         </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" type="button" :disabled="saving || loading" @click="saveConfig">
+            <span v-if="saving" class="loading"></span>
+            {{ saving ? '保存中…' : '💾 保存配置' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -492,6 +506,12 @@ onMounted(() => {
         <div class="hint" style="margin-top: 0">
           测试通知会跳过事件去重，但仍然受地址校验与超时约束；发送结果不影响推理服务。
         </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" type="button" :disabled="saving || loading" @click="saveConfig">
+            <span v-if="saving" class="loading"></span>
+            {{ saving ? '保存中…' : '💾 保存配置' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -542,6 +562,7 @@ onMounted(() => {
           <dd>
             <router-link to="/proxies">🌐 出站代理池</router-link>
             <span class="hint" style="margin-left: 6px">
+              <template v-if="config && config.proxyPool">运行中 {{ fmtNum(config.proxyPool.total) }} 条（健康 {{ fmtNum(config.proxyPool.healthy) }}） · </template>
               config.json {{ config && config.proxies ? config.proxies.length : 0 }} 条
               <template v-if="config && config.proxyFile"> · 文件 {{ config.proxyFile }}</template>
             </span>

@@ -48,6 +48,16 @@ function toggleTheme() {
   applyTheme(theme.value)
 }
 
+async function copyAddress() {
+  if (!apiAddress.value || apiAddress.value === '-') return
+  try {
+    await navigator.clipboard.writeText(apiAddress.value)
+    toast.success('已复制 API 地址')
+  } catch {
+    toast.error('复制失败，请手动选择复制')
+  }
+}
+
 async function doLogout() {
   if (!window.confirm('确定退出登录吗？')) return
   await logout()
@@ -58,38 +68,48 @@ async function doLogout() {
 
 <template>
   <aside class="sidebar">
-    <h1>
-      <span class="logo" aria-hidden="true">⚡</span>
-      <span class="brand-name">Command Code</span>
-      <button
-        class="theme-toggle"
-        type="button"
-        :title="theme === 'dark' ? '切换到暖白浅色主题' : '切换到暖夜深色主题'"
-        @click="toggleTheme"
-      >
-        <span class="icon" aria-hidden="true">{{ themeIcon }}</span>
-        <span class="theme-label">{{ themeLabel }}</span>
-      </button>
-    </h1>
+    <div class="sidebar-inner">
+      <h1>
+        <span class="logo" aria-hidden="true">⚡</span>
+        <span class="brand-name">Command Code</span>
+        <button
+          class="theme-toggle"
+          type="button"
+          :title="theme === 'dark' ? '切换到暖白浅色主题' : '切换到暖夜深色主题'"
+          @click="toggleTheme"
+        >
+          <span class="icon" aria-hidden="true">{{ themeIcon }}</span>
+          <span class="theme-label">{{ themeLabel }}</span>
+        </button>
+      </h1>
 
-    <nav class="sidebar-nav" aria-label="主导航">
-      <router-link
-        v-for="item in NAV"
-        :key="item.name"
-        class="nav-item"
-        active-class="active"
-        :to="{ name: item.name }"
-      >
-        <span class="nav-ico" aria-hidden="true">{{ item.icon }}</span>
-        <span>{{ item.title }}</span>
-      </router-link>
-    </nav>
+      <nav class="sidebar-nav" aria-label="主导航">
+        <router-link
+          v-for="item in NAV"
+          :key="item.name"
+          class="nav-item"
+          active-class="active"
+          :to="{ name: item.name }"
+        >
+          <span class="nav-ico" aria-hidden="true">{{ item.icon }}</span>
+          <span>{{ item.title }}</span>
+        </router-link>
+      </nav>
 
-    <div class="sidebar-footer">
-      <div class="sidebar-footer-actions">
-        <button class="btn btn-sm btn-danger" type="button" @click="doLogout">⏻ 退出登录</button>
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-actions">
+          <button class="btn btn-sm btn-danger" type="button" @click="doLogout">⏻ 退出登录</button>
+        </div>
+        <button
+          class="footer-addr"
+          type="button"
+          :title="`点击复制 API 地址：${apiAddress}`"
+          @click="copyAddress"
+        >
+          <span class="footer-addr-label">API 地址</span>
+          <span class="footer-addr-url">{{ apiAddress }}</span>
+        </button>
       </div>
-      <div class="footer-addr">API 地址: <span>{{ apiAddress }}</span></div>
     </div>
   </aside>
 </template>

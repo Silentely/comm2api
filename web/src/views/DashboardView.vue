@@ -27,6 +27,8 @@ import {
   fmtTokens,
   fmtResetTime,
   fmtUptime,
+  quotaStateLabel,
+  quotaStateTone,
 } from '../utils'
 import StatCard from '../components/StatCard.vue'
 import TestResultBox from '../components/TestResultBox.vue'
@@ -460,6 +462,8 @@ onUnmounted(() => {
           <dt>轮询策略</dt>
           <dd>{{ strategyText }}</dd>
           <dt>上游地址</dt>
+          <dd class="mono">{{ admin.apiBase || '-' }}</dd>
+          <dt>监听地址</dt>
           <dd class="mono">{{ admin.address || '-' }}</dd>
           <dt>持久化存储</dt>
           <dd>
@@ -526,12 +530,13 @@ onUnmounted(() => {
             />
           </div>
 
-          <div v-for="acc in quota.accounts" :key="acc.keyId" style="margin-bottom: 8px">
-            <div style="display: flex; justify-content: space-between; font-size: 12px">
-              <span>
+          <div v-for="acc in quota.accounts" :key="acc.keyId" style="margin-bottom: 10px">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px">
+              <span class="inline-flex" style="gap: 6px; flex-wrap: wrap">
+                <span class="badge" :class="quotaStateTone(acc)" :title="acc.stateLabel || ''">{{ quotaStateLabel(acc) }}</span>
                 <strong>{{ acc.label || acc.keyMasked || acc.keyId }}</strong>
-                <span class="text-dim"> · {{ acc.plan || '套餐未知' }} · {{ acc.state }}</span>
-                <span v-if="acc.stale" class="text-warn"> · 数据过期</span>
+                <span class="text-dim">{{ acc.plan || '套餐未知' }}</span>
+                <span v-if="acc.stale && acc.state !== 'quota_unknown'" class="text-warn"> · 数据过期</span>
                 <span v-if="acc.proxy && acc.proxy.mode === 'strict_bind'" class="badge" :class="acc.proxy.available ? 'ok' : 'danger'" style="margin-left: 6px">
                   严格固定{{ acc.proxy.available ? '' : '（不可用）' }}
                 </span>

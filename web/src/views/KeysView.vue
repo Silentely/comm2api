@@ -26,6 +26,8 @@ import {
   fmtTokens,
   isRecentWarm,
   isWarmedAfterReset,
+  quotaStateLabel as fmtQuotaStateLabel,
+  quotaStateTone as fmtQuotaStateTone,
   remainingSeconds,
   truncate,
 } from '../utils'
@@ -281,40 +283,16 @@ function cooldownLeft(k) {
 // ── 官方额度 ──────────────────────────────────────
 // 这里展示的是**官方口径**（lib/quota.mjs 采集）。与上面的本地用量是两个东西，
 // 所以单独两列，绝不把 token 数换算成「剩余额度」。
-const QUOTA_STATE_TONE = {
-  available: 'ok',
-  quota_warning: 'warn',
-  quota_exhausted: 'danger',
-  rate_limited: 'warn',
-  proxy_unavailable: 'danger',
-  auth_invalid: 'danger',
-  manually_disabled: 'muted',
-  quota_unknown: 'muted',
-}
-
 function quotaOf(k) {
   return (k && k.quota) || null
 }
 
 function quotaStateTone(k) {
-  const q = quotaOf(k)
-  return (q && QUOTA_STATE_TONE[q.state]) || 'muted'
+  return fmtQuotaStateTone(quotaOf(k))
 }
 
 function quotaStateLabel(k) {
-  const q = quotaOf(k)
-  if (!q) return '未采集'
-  // 数据过期时直接说明原因；只显示「额度未知」会让人以为从来没采集到过。
-  if (q.state === 'quota_unknown') {
-    if (!q.fetchedAt) return '尚未采集'
-    if (q.stale) return '数据已过期'
-  }
-  const map = {
-    available: '可用', quota_warning: '接近上限', quota_exhausted: '额度耗尽',
-    rate_limited: '限流中', proxy_unavailable: '代理不可用', auth_invalid: '鉴权失效',
-    manually_disabled: '已禁用', quota_unknown: '额度未知',
-  }
-  return map[q.state] || q.state
+  return fmtQuotaStateLabel(quotaOf(k))
 }
 
 function fiveHour(k) {
@@ -448,18 +426,20 @@ onUnmounted(() => {
     <h2>
       🔑 上游 Key
       <span class="probe-pill">Command Code 账号凭证（user_ 开头）· 这是服务端拿去调用上游用的</span>
-      <button class="btn btn-sm" style="margin-left: auto" type="button" :disabled="keysState.loading" @click="loadKeys(true)">
-        <span v-if="keysState.loading" class="loading"></span>
-        {{ keysState.loading ? '加载中…' : '🔄 刷新' }}
-      </button>
-      <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" @click="refreshQuota(null)">
-        <span v-if="busy.quotaId === 'all'" class="loading"></span>
-        {{ busy.quotaId === 'all' ? '查询官方额度…' : '📊 刷新全部额度' }}
-      </button>
-      <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" title="给全部启用的账号发送极小请求激活 5 小时窗口" @click="warmupQuota(null)">
-        <span v-if="busy.quotaId === 'warmup_all'" class="loading"></span>
-        {{ busy.quotaId === 'warmup_all' ? '预热中…' : '🔥 预热全部' }}
-      </button>
+      <div class="header-actions">
+        <button class="btn btn-sm" type="button" :disabled="keysState.loading" @click="loadKeys(true)">
+          <span v-if="keysState.loading" class="loading"></span>
+          {{ keysState.loading ? '加载中…' : '🔄 刷新' }}
+        </button>
+        <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" @click="refreshQuota(null)">
+          <span v-if="busy.quotaId === 'all'" class="loading"></span>
+          {{ busy.quotaId === 'all' ? '查询官方额度…' : '📊 刷新全部额度' }}
+        </button>
+        <button class="btn btn-sm" type="button" :disabled="!!busy.quotaId" title="给全部启用的账号发送极小请求激活 5 小时窗口" @click="warmupQuota(null)">
+          <span v-if="busy.quotaId === 'warmup_all'" class="loading"></span>
+          {{ busy.quotaId === 'warmup_all' ? '预热中…' : '🔥 预热全部' }}
+        </button>
+      </div>
     </h2>
 
     <div class="result-box result-box-info">
@@ -506,7 +486,9 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="hint">
-          <strong>轮询</strong>按顺序依次使用；<strong>随机</strong>随机挑选；<strong>填满</strong>优先压满同一个 Key 再切换。
+          <strong>轮询</strong>按顺序依次使用；<strong>随机</strong>随机挑选；<strong>填满</strong>优先压满同一个 Key 再切换；
+          <strong>额度感知</strong>按官方剩余额度（五小时 → 周 → 月）优先派发；
+          <strong>额度感知 + 会话粘性</strong>在此基础上尽量让同一会话命中同一账号以提升缓存命中率。
         </div>
       </div>
     </div>
@@ -700,12 +682,13 @@ onUnmounted(() => {
                 <span v-if="k.lastError" class="cell-error" :title="k.lastError">{{ truncate(k.lastError, 34) }}</span>
                 <span v-else>-</span>
               </td>
-              <td style="white-space: nowrap">
+              <td>
+                <div class="row-actions">
                 <template v-if="editing.id === k.id">
                   <button class="btn btn-sm btn-primary" type="button" :disabled="busy.rowId === k.id" @click="saveEdit(k)">
                     保存
                   </button>
-                  <button class="btn btn-sm" style="margin-left: 6px" type="button" @click="cancelEdit">取消</button>
+                  <button class="btn btn-sm" type="button" @click="cancelEdit">取消</button>
                 </template>
                 <template v-else>
                   <!-- 一键停用 / 启用：停用后该 Key 立即从轮询池剔除（正在冷却或已失败的请求不受影响）。
@@ -732,12 +715,11 @@ onUnmounted(() => {
                     <span v-if="busy.rowId === k.id" class="loading"></span>
                     <span v-else>▶ 启用</span>
                   </button>
-                  <button class="btn btn-sm btn-icon" style="margin-left: 6px" type="button" title="显示 / 隐藏完整 Key" @click="reveal(k)">
+                  <button class="btn btn-sm btn-icon" type="button" title="显示 / 隐藏完整 Key" @click="reveal(k)">
                     {{ revealed[k.id] ? '🙈' : '👁' }}
                   </button>
                   <button
                     class="btn btn-sm btn-icon"
-                    style="margin-left: 6px"
                     type="button"
                     title="测试该 Key 是否可用"
                     :disabled="busy.testingId === k.id"
@@ -748,7 +730,6 @@ onUnmounted(() => {
                   </button>
                   <button
                     class="btn btn-sm btn-icon"
-                    style="margin-left: 6px"
                     type="button"
                     title="编辑标签 / 启用状态"
                     @click="startEdit(k)"
@@ -758,7 +739,6 @@ onUnmounted(() => {
                   <button
                     v-if="isReadonly(k)"
                     class="btn btn-sm"
-                    style="margin-left: 6px"
                     type="button"
                     title="导入为后台可管理的 Key"
                     :disabled="busy.importingId === k.id"
@@ -768,7 +748,6 @@ onUnmounted(() => {
                   </button>
                   <button
                     class="btn btn-sm btn-danger btn-icon"
-                    style="margin-left: 6px"
                     type="button"
                     title="删除"
                     :disabled="isReadonly(k) || busy.rowId === k.id"
@@ -777,6 +756,7 @@ onUnmounted(() => {
                     ✕
                   </button>
                 </template>
+                </div>
               </td>
             </tr>
           </tbody>

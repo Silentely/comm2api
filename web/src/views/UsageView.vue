@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { loadStats } from '../store'
 import { toast } from '../toast'
-import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtResetTime, fmtTokens, isRecentWarm, isWarmedAfterReset } from '../utils'
+import { SOURCE_LABELS, fmtDateTime, fmtNum, fmtPct, fmtResetTime, fmtTokens, isRecentWarm, isWarmedAfterReset, quotaStateLabel, quotaStateTone } from '../utils'
 import StatCard from '../components/StatCard.vue'
 
 const data = ref(null)
@@ -137,22 +137,11 @@ function qResetText(w, warmedAt = null) {
 }
 
 function quoteStateTone(acc) {
-  const map = { available: 'ok', quota_warning: 'warn', quota_exhausted: 'danger', rate_limited: 'warn', proxy_unavailable: 'danger', auth_invalid: 'danger', quota_unknown: 'muted', manually_disabled: 'muted' }
-  return map[acc.state] || 'muted'
+  return quotaStateTone(acc)
 }
 
 function quotaStateText(acc) {
-  // 数据过期时直接说明原因；只显示「额度未知」会让人以为从来没采集到过。
-  if (acc.state === 'quota_unknown') {
-    if (!acc.fetchedAt) return '尚未采集'
-    if (acc.stale) return '数据已过期'
-  }
-  const map = {
-    available: '可用', quota_warning: '接近上限', quota_exhausted: '额度耗尽',
-    rate_limited: '限流中', proxy_unavailable: '代理不可用', auth_invalid: '鉴权失效',
-    quota_unknown: '额度未知', manually_disabled: '已禁用',
-  }
-  return map[acc.state] || acc.state
+  return quotaStateLabel(acc)
 }
 
 // 时间区间统计（本地口径）：5m / 1h / 5h / 24h / 7d
@@ -270,41 +259,42 @@ onMounted(() => {
         <table>
           <thead>
             <tr>
-              <th>Key</th>
-              <th>标签</th>
-              <th>来源</th>
-              <th>今日请求</th>
-              <th>今日成功</th>
-              <th>今日失败</th>
-              <th>累计请求</th>
-              <th>累计失败</th>
-              <th>今日输入<br /><span class="text-dim" style="font-size: 10px">缓存命中 / 未命中</span></th>
+              <th>账号 / Key</th>
+              <th>今日请求<br /><span class="text-dim" style="font-size: 10px">总 · 成功 / 失败</span></th>
+              <th>累计请求<br /><span class="text-dim" style="font-size: 10px">总 / 失败</span></th>
+              <th>今日输入<br /><span class="text-dim" style="font-size: 10px">命中 / 未命中</span></th>
               <th>今日输出</th>
-              <th>累计输入<br /><span class="text-dim" style="font-size: 10px">缓存命中 / 未命中</span></th>
-              <th>累计输出</th>
+              <th>累计 Tokens<br /><span class="text-dim" style="font-size: 10px">输入 / 输出</span></th>
               <th>最后使用</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!items.length">
-              <td colspan="14" class="empty">{{ loading ? '加载中…' : '暂无用量数据' }}</td>
+              <td colspan="8" class="empty">{{ loading ? '加载中…' : '暂无用量数据' }}</td>
             </tr>
             <tr v-for="it in items" :key="it.keyId">
               <td>
-                <span class="key-display">{{ it.keyMasked || '-' }}</span>
-                <div class="text-dim" style="font-size: 11px" :title="it.keyId">{{ it.keyId }}</div>
+                <div>
+                  <strong>{{ it.label || it.keyMasked || '-' }}</strong>
+                  <span class="model-tag" :class="it.source" style="margin-left: 6px">{{ SOURCE_LABELS[it.source] || it.source || '-' }}</span>
+                </div>
+                <div class="text-dim mono" style="font-size: 11px; margin-top: 2px" :title="it.keyId">{{ it.keyMasked || it.keyId }}</div>
               </td>
-              <td>{{ it.label || '-' }}</td>
-              <td><span class="model-tag" :class="it.source">{{ SOURCE_LABELS[it.source] || it.source || '-' }}</span></td>
-              <td class="mono">{{ fmtNum(it.requestsToday) }}</td>
-              <td class="mono text-green">{{ fmtNum(it.successToday) }}</td>
-              <td class="mono" :class="it.failedToday ? 'text-danger' : ''">
-                {{ fmtNum(it.failedToday) }}
-                <span v-if="failPercent(it)" class="text-dim" style="font-size: 10px">({{ failPercent(it) }}%)</span>
+              <td class="mono">
+                <div>
+                  <strong>{{ fmtNum(it.requestsToday) }}</strong>
+                  <span class="text-dim"> · </span>
+                  <span class="text-green">{{ fmtNum(it.successToday) }}</span>
+                  <span class="text-dim"> / </span>
+                  <span :class="it.failedToday ? 'text-danger' : 'text-dim'">{{ fmtNum(it.failedToday) }}</span>
+                </div>
+                <div v-if="failPercent(it)" class="text-danger" style="font-size: 11px">失败率 {{ failPercent(it) }}%</div>
               </td>
-              <td class="mono">{{ fmtNum(it.requestsTotal) }}</td>
-              <td class="mono" :class="it.failedTotal ? 'text-danger' : ''">{{ fmtNum(it.failedTotal) }}</td>
+              <td class="mono">
+                <div>{{ fmtNum(it.requestsTotal) }}</div>
+                <div class="text-dim" style="font-size: 11px" :class="it.failedTotal ? 'text-danger' : ''">失败 {{ fmtNum(it.failedTotal) }}</div>
+              </td>
               <td class="mono">
                 {{ fmtTokens(it.cacheReadToday) }} / {{ fmtTokens(it.cacheMissToday) }}
                 <div class="text-dim" style="font-size: 11px">
@@ -314,35 +304,35 @@ onMounted(() => {
               </td>
               <td class="mono">{{ fmtTokens(it.tokensOutToday) }}</td>
               <td class="mono">
-                {{ fmtTokens(it.cacheReadTotal) }} / {{ fmtTokens(it.cacheMissTotal) }}
+                {{ fmtTokens(it.tokensInTotal) }} / {{ fmtTokens(it.tokensOutTotal) }}
                 <div class="text-dim" style="font-size: 11px">
-                  命中率 {{ fmtPct(it.cacheHitRateTotal) }} · 合计 {{ fmtTokens(it.tokensInTotal) }}
+                  命中 {{ fmtTokens(it.cacheReadTotal) }}（{{ fmtPct(it.cacheHitRateTotal) }}）
                 </div>
               </td>
-              <td class="mono">{{ fmtTokens(it.tokensOutTotal) }}</td>
               <td class="mono">{{ fmtDateTime(it.lastUsedAt) }}</td>
-              <td style="white-space: nowrap">
-                <button
-                  class="btn btn-sm"
-                  type="button"
-                  title="重置该 Key 今日用量（累计数据不受影响）"
-                  :disabled="!!busy[`${it.keyId}:today`]"
-                  @click="resetUsage(it, 'today')"
-                >
-                  <span v-if="busy[`${it.keyId}:today`]" class="loading"></span>
-                  <span v-else>↻ 今日</span>
-                </button>
-                <button
-                  class="btn btn-sm btn-danger"
-                  style="margin-left: 6px"
-                  type="button"
-                  title="重置该 Key 全部用量（不可恢复）"
-                  :disabled="!!busy[`${it.keyId}:all`]"
-                  @click="resetUsage(it, 'all')"
-                >
-                  <span v-if="busy[`${it.keyId}:all`]" class="loading"></span>
-                  <span v-else>🗑 全部</span>
-                </button>
+              <td>
+                <div class="row-actions">
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    title="重置该 Key 今日用量（累计数据不受影响）"
+                    :disabled="!!busy[`${it.keyId}:today`]"
+                    @click="resetUsage(it, 'today')"
+                  >
+                    <span v-if="busy[`${it.keyId}:today`]" class="loading"></span>
+                    <span v-else>↻ 今日</span>
+                  </button>
+                  <button
+                    class="btn btn-sm btn-danger"
+                    type="button"
+                    title="重置该 Key 全部用量（不可恢复）"
+                    :disabled="!!busy[`${it.keyId}:all`]"
+                    @click="resetUsage(it, 'all')"
+                  >
+                    <span v-if="busy[`${it.keyId}:all`]" class="loading"></span>
+                    <span v-else>🗑 全部</span>
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -403,27 +393,27 @@ onMounted(() => {
       <div class="section-title">
         📊 官方额度（官方口径）
         <span class="probe-pill">来自上游额度接口 · 与上方本地计数无关</span>
-        <button
-          class="btn btn-sm"
-          style="margin-left: auto"
-          type="button"
-          :disabled="!!quotaBusy || quotaLoading"
-          @click="refreshQuota(null)"
-        >
-          <span v-if="quotaBusy === 'all'" class="loading"></span>
-          {{ quotaBusy === 'all' ? '刷新中…' : '🔄 刷新全部额度' }}
-        </button>
-        <button
-          class="btn btn-sm"
-          style="margin-left: 8px"
-          type="button"
-          :disabled="!!quotaBusy || quotaLoading"
-          title="给全部启用的上游账号发送极小请求激活 5 小时窗口"
-          @click="warmupQuota(null)"
-        >
-          <span v-if="quotaBusy === 'warmup_all'" class="loading"></span>
-          {{ quotaBusy === 'warmup_all' ? '预热中…' : '🔥 预热全部开窗' }}
-        </button>
+        <div class="header-actions">
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="!!quotaBusy || quotaLoading"
+            @click="refreshQuota(null)"
+          >
+            <span v-if="quotaBusy === 'all'" class="loading"></span>
+            {{ quotaBusy === 'all' ? '刷新中…' : '🔄 刷新全部额度' }}
+          </button>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="!!quotaBusy || quotaLoading"
+            title="给全部启用的上游账号发送极小请求激活 5 小时窗口"
+            @click="warmupQuota(null)"
+          >
+            <span v-if="quotaBusy === 'warmup_all'" class="loading"></span>
+            {{ quotaBusy === 'warmup_all' ? '预热中…' : '🔥 预热全部开窗' }}
+          </button>
+        </div>
       </div>
       <div class="section-body">
         <div v-if="!quota" class="hint">{{ quotaLoading ? '加载中…' : '尚未采集到官方额度' }}</div>
@@ -450,27 +440,27 @@ onMounted(() => {
               >优先 #{{ priorityIndex.get(acc.keyId) }}</span>
               <span>{{ acc.label || acc.keyMasked || acc.keyId }}</span>
               <span class="text-dim" style="font-size: 12px">{{ acc.plan || '套餐未知' }}</span>
-              <button
-                class="btn btn-sm"
-                type="button"
-                style="margin-left: auto"
-                :disabled="!!quotaBusy"
-                @click="refreshQuota(acc.keyId)"
-              >
-                <span v-if="quotaBusy === acc.keyId" class="loading"></span>
-                {{ quotaBusy === acc.keyId ? '刷新中…' : '📊 刷新' }}
-              </button>
-              <button
-                class="btn btn-sm"
-                type="button"
-                style="margin-left: 6px"
-                :disabled="!!quotaBusy"
-                title="发送极小请求激活该账号的 5 小时窗口"
-                @click="warmupQuota(acc.keyId)"
-              >
-                <span v-if="quotaBusy === 'warmup_' + acc.keyId" class="loading"></span>
-                {{ quotaBusy === 'warmup_' + acc.keyId ? '预热中…' : '🔥 预热' }}
-              </button>
+              <div class="header-actions">
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="!!quotaBusy"
+                  @click="refreshQuota(acc.keyId)"
+                >
+                  <span v-if="quotaBusy === acc.keyId" class="loading"></span>
+                  {{ quotaBusy === acc.keyId ? '刷新中…' : '📊 刷新' }}
+                </button>
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  :disabled="!!quotaBusy"
+                  title="发送极小请求激活该账号的 5 小时窗口"
+                  @click="warmupQuota(acc.keyId)"
+                >
+                  <span v-if="quotaBusy === 'warmup_' + acc.keyId" class="loading"></span>
+                  {{ quotaBusy === 'warmup_' + acc.keyId ? '预热中…' : '🔥 预热' }}
+                </button>
+              </div>
             </div>
 
             <div v-for="name in ['fiveHour', 'weekly', 'monthly']" :key="name" style="margin-top: 8px">

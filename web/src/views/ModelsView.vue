@@ -36,16 +36,34 @@ const testKeyId = ref('')
 const concurrency = ref(4)
 const showAllResults = ref(false)
 
-/* ---- 模型多选与启用/禁用 ---- */
+/* ---- 模型筛选、多选与启用/禁用 ---- */
+const searchQuery = ref('')
+const statusFilter = ref('all') // all | enabled | disabled
 const selectedIds = ref([])
 const savingSelection = ref(false)
 const togglingId = ref('')
 
-const selectedCount = computed(() => selectedIds.value.length)
-const allSelected = computed(() => list.value.length > 0 && selectedIds.value.length === list.value.length)
-const someSelected = computed(() => selectedIds.value.length > 0 && !allSelected.value)
+const list = computed(() => models.list || [])
 const enabledCount = computed(() => list.value.filter((m) => m.enabled !== false).length)
 const disabledCount = computed(() => list.value.length - enabledCount.value)
+
+const filteredList = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  return list.value.filter((m) => {
+    if (statusFilter.value === 'enabled' && m.enabled === false) return false
+    if (statusFilter.value === 'disabled' && m.enabled !== false) return false
+    if (!q) return true
+    return String(m.id || '').toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q)
+  })
+})
+
+const selectedCount = computed(() => selectedIds.value.length)
+const allSelected = computed(() =>
+  filteredList.value.length > 0 && filteredList.value.every((m) => selectedIds.value.includes(m.id)),
+)
+const someSelected = computed(() =>
+  filteredList.value.some((m) => selectedIds.value.includes(m.id)) && !allSelected.value,
+)
 
 function isSelected(id) {
   return selectedIds.value.includes(id)
@@ -59,7 +77,12 @@ function toggleSelect(id, checked) {
 }
 
 function toggleSelectAll(checked) {
-  selectedIds.value = checked ? list.value.map((m) => m.id) : []
+  const set = new Set(selectedIds.value)
+  for (const m of filteredList.value) {
+    if (checked) set.add(m.id)
+    else set.delete(m.id)
+  }
+  selectedIds.value = [...set]
 }
 
 function clearSelection() {
@@ -99,7 +122,6 @@ async function toggleOneModel(m, enabled) {
   }
 }
 
-const list = computed(() => models.list || [])
 const keyOptions = computed(() => keysState.list || [])
 
 const batchByModel = computed(() => {
@@ -349,9 +371,28 @@ onMounted(() => {
         <span class="probe-pill">来自上游 /provider/v1/models（缓存）</span>
       </div>
       <div class="section-body" style="padding-bottom: 0">
+        <div class="filter-bar">
+          <input
+            v-model="searchQuery"
+            type="search"
+            class="filter-input"
+            placeholder="搜索模型 ID 或名称（如 claude / deepseek / glm）…"
+          />
+          <div class="tabs" style="border-bottom: none; padding: 0; background: transparent">
+            <button class="tab" :class="{ active: statusFilter === 'all' }" type="button" @click="statusFilter = 'all'">
+              全部 <span class="probe-pill">{{ fmtNum(list.length) }}</span>
+            </button>
+            <button class="tab" :class="{ active: statusFilter === 'enabled' }" type="button" @click="statusFilter = 'enabled'">
+              已启用 <span class="probe-pill">{{ fmtNum(enabledCount) }}</span>
+            </button>
+            <button class="tab" :class="{ active: statusFilter === 'disabled' }" type="button" @click="statusFilter = 'disabled'">
+              已禁用 <span class="probe-pill">{{ fmtNum(disabledCount) }}</span>
+            </button>
+          </div>
+        </div>
         <div class="form-row" style="align-items: center; gap: 10px">
           <span class="probe-pill">
-            已选 {{ fmtNum(selectedCount) }} / {{ fmtNum(list.length) }}
+            显示 {{ fmtNum(filteredList.length) }} / {{ fmtNum(list.length) }} · 已选 {{ fmtNum(selectedCount) }}
           </span>
           <div style="margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap">
             <button
@@ -402,10 +443,12 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!list.length">
-              <td colspan="9" class="empty">{{ models.loading ? '加载中…' : '暂无模型，请点击「同步上游模型」' }}</td>
+            <tr v-if="!filteredList.length">
+              <td colspan="9" class="empty">
+                {{ models.loading ? '加载中…' : (list.length ? '当前筛选条件下没有匹配的模型' : '暂无模型，请点击「同步上游模型」') }}
+              </td>
             </tr>
-            <tr v-for="m in list" :key="m.id" :class="{ 'row-disabled': m.enabled === false }">
+            <tr v-for="m in filteredList" :key="m.id" :class="{ 'row-disabled': m.enabled === false }">
               <td class="col-check">
                 <input
                   type="checkbox"
@@ -451,8 +494,8 @@ onMounted(() => {
                 <button
                   class="btn btn-sm"
                   type="button"
-                  title="对该模型发起一次真实测试"
-                  :disabled="testingModel === m.id"
+                  :title="m.enabled === false ? '模型已禁用，启用后可测试' : '对该模型发起一次真实测试'"
+                  :disabled="testingModel === m.id || m.enabled === false"
                   @click="testOne(m)"
                 >
                   <span v-if="testingModel === m.id" class="loading"></span>

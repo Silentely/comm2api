@@ -29,6 +29,43 @@ export const SOURCE_LABELS = {
   env: '环境变量',
 }
 
+export const QUOTA_STATE_TONES = {
+  available: 'ok',
+  quota_warning: 'warn',
+  quota_exhausted: 'danger',
+  rate_limited: 'warn',
+  proxy_unavailable: 'danger',
+  auth_invalid: 'danger',
+  manually_disabled: 'muted',
+  quota_unknown: 'muted',
+}
+
+export const QUOTA_STATE_LABELS = {
+  available: '可用',
+  quota_warning: '接近上限',
+  quota_exhausted: '额度耗尽',
+  rate_limited: '限流中',
+  proxy_unavailable: '代理不可用',
+  auth_invalid: '鉴权失效',
+  manually_disabled: '已禁用',
+  quota_unknown: '额度未知',
+}
+
+export function quotaStateTone(q) {
+  if (!q || !q.state) return 'muted'
+  return QUOTA_STATE_TONES[q.state] || 'muted'
+}
+
+export function quotaStateLabel(q) {
+  if (!q) return '未采集'
+  // 数据过期时直接说明原因；只显示「额度未知」会让人以为从来没采集到过。
+  if (q.state === 'quota_unknown') {
+    if (!q.fetchedAt) return '尚未采集'
+    if (q.stale) return '数据已过期'
+  }
+  return QUOTA_STATE_LABELS[q.state] || q.state || '未知'
+}
+
 // category 枚举同时用于 health.status 与测试结果
 export const CATEGORY_LABELS = {
   ok: '正常',
@@ -47,6 +84,7 @@ export const CATEGORY_TONES = {
   quota: 'warn',
   not_in_plan: 'warn',
   network: 'danger',
+  proxy: 'danger',
   error: 'danger',
   unknown: 'muted',
 }
