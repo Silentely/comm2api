@@ -8,6 +8,7 @@ import { setup, startProxy, allocPort, closeServer, seedConfig, REPO } from './h
 import http from 'node:http';
 import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { maskKey } from '../lib/keys.mjs';
+import { clientIp } from '../lib/admin-api.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -121,6 +122,70 @@ test('同一来源连续失败 5 次后锁定，返回 429 与 retry_after', asy
     // 换一个来源不受影响：限速是按来源隔离的
     const other = await login(s.proxy, PASSWORD, { 'X-Forwarded-For': '203.0.113.10' });
     assert.equal(other.status, 200);
+  } finally { await s.close(); }
+});
+
+test("clientIp 安全防护：未受信任直连时防伪造，受信任时优先 CF-Connecting-IP", async () => {
+  // 1. 直连公网 IP（未受信任代理）：忽略所有代理头，返回真实 socket remoteAddress
+  const untrustedReq = {
+    socket: { remoteAddress: "198.51.100.5" },
+    headers: {
+      "cf-connecting-ip": "203.0.113.195",
+      "x-forwarded-for": "203.0.113.100, 10.0.0.1",
+    },
+  };
+  assert.equal(clientIp(untrustedReq), "198.51.100.5", "未受信任来源伪造头部必须被忽略");
+
+  // 2. 回环代理（受信任）：优先识别 CF-Connecting-IP
+  const loopbackWithCf = {
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: {
+      "cf-connecting-ip": "  203.0.113.195  ",
+      "x-forwarded-for": "198.51.100.1",
+    },
+  };
+  assert.equal(clientIp(loopbackWithCf), "203.0.113.195", "受信任代理时优先使用 CF-Connecting-IP");
+
+  // 3. 回环代理（受信任）：CF-Connecting-IP 为空时回退到 X-Forwarded-For 首段
+  const loopbackWithXff = {
+    socket: { remoteAddress: "::ffff:127.0.0.1" },
+    headers: {
+      "cf-connecting-ip": "  ",
+      "x-forwarded-for": "203.0.113.88, 10.0.0.1",
+    },
+  };
+  assert.equal(clientIp(loopbackWithXff), "203.0.113.88", "无 CF 头部时回退到 XFF 首段");
+
+  // 4. CC_TRUST_PROXY / TRUST_PROXY 显式启用时：信任代理头
+  const origTrust = process.env.CC_TRUST_PROXY;
+  try {
+    process.env.CC_TRUST_PROXY = "1";
+    const remoteReq = {
+      socket: { remoteAddress: "10.0.0.2" },
+      headers: { "cf-connecting-ip": "203.0.113.99" },
+    };
+    assert.equal(clientIp(remoteReq), "203.0.113.99", "显式开启 CC_TRUST_PROXY 时信任 CF-Connecting-IP");
+  } finally {
+    if (origTrust !== undefined) process.env.CC_TRUST_PROXY = origTrust;
+    else delete process.env.CC_TRUST_PROXY;
+  }
+});
+
+test("登录限速防爆破：通过 CF-Connecting-IP 识别真实客户端并实施隔离锁定", async () => {
+  const s = await setup({ env: BASE_ENV });
+  try {
+    const cfIp = { "CF-Connecting-IP": "203.0.113.195" };
+    for (let i = 0; i < 5; i++) {
+      const r = await login(s.proxy, "nope", cfIp);
+      assert.equal(r.status, 401, `第 ${i + 1} 次失败应是 401`);
+    }
+    const locked = await login(s.proxy, "nope", cfIp);
+    assert.equal(locked.status, 429, "第 6 次必须按 CF-Connecting-IP 被限速");
+    assert.ok(locked.json.retry_after > 0, "限速响应要给出 retry_after");
+
+    // 另一个客户端（不同 CF-Connecting-IP）不受影响
+    const other = await login(s.proxy, PASSWORD, { "CF-Connecting-IP": "203.0.113.196" });
+    assert.equal(other.status, 200, "不同 CF-Connecting-IP 来源不应被连带锁定");
   } finally { await s.close(); }
 });
 

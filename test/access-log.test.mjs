@@ -130,3 +130,30 @@ test('空闲超时默认值已放宽到 180s（30s 会误杀长推理）', async
       '默认流式空闲预算必须是 180s：实测推理模型会在 reasoning-delta 之后静默 30~70s');
   } finally { await s.close(); }
 });
+
+test("访问日志：记录客户端真实 clientIp（支持 CF-Connecting-IP 与本地直连兜底）", async () => {
+  const s = await setup();
+  try {
+    // 1. 携带 CF-Connecting-IP
+    const r1 = await s.proxy.post("/v1/chat/completions",
+      { model: "m", messages: [{ role: "user", content: "hi" }] },
+      { ...AUTH, "CF-Connecting-IP": "203.0.113.195" });
+    await r1.text();
+
+    // 2. 直连（无代理头，走回环兜底）
+    const r2 = await s.proxy.post("/v1/chat/completions",
+      { model: "m", messages: [{ role: "user", content: "hi" }] },
+      AUTH);
+    await r2.text();
+
+    await settle();
+
+    const rows = accessRows(s.proxy);
+    const cfRow = rows.find(x => x.clientIp === "203.0.113.195");
+    assert.ok(cfRow, "访问日志应记录穿透解析出的 CF-Connecting-IP");
+    assert.equal(cfRow.clientIp, "203.0.113.195");
+
+    const localRow = rows.find(x => x.clientIp === "127.0.0.1");
+    assert.ok(localRow, "直连请求在访问日志中应记录 socket 远端地址");
+  } finally { await s.close(); }
+});

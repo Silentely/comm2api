@@ -26,7 +26,7 @@ import { createApiKeyPool, looksLikeUpstreamKey } from './lib/api-keys.mjs';
 import { createAdminAuth } from './lib/admin-auth.mjs';
 import { createModelCatalog, createModelTestRunner, classifyProbe } from './lib/models.mjs';
 import { createModelState } from './lib/model-state.mjs';
-import { createAdminApi } from './lib/admin-api.mjs';
+import { createAdminApi, clientIp } from './lib/admin-api.mjs';
 // 额度感知调度相关的四个模块（全部可独立关闭：关掉就等于升级前的行为）
 import { createQuotaService } from './lib/quota.mjs';
 import { unavailabilitySummary, retryAfterSecFor, rankAccount } from './lib/quota-policy.mjs';
@@ -2443,6 +2443,7 @@ function initAccess(req, res, pathname) {
   const acc = {
     started: Date.now(), method: req.method, path: pathname,
     model: null, streaming: null, outcome: null, bytesOut: 0, logged: false,
+    clientIp: null,
   };
   res.__ccp = acc;
   // 统计出网字节：「发了多少就断了」是判断故障究竟在代理、上游还是下游的关键线索。
@@ -2472,6 +2473,7 @@ function initAccess(req, res, pathname) {
       model: acc.model || undefined,
       outcome,
       bytesOut: acc.bytesOut,
+      clientIp: acc.clientIp || undefined,
     });
     // 本地用量分析（滑动窗口）。只收数值与枚举，**不含任何正文/凭据**。
     // 只记三条数据面协议：/v1/models 之类也以 /v1/ 开头，但它们不是一次推理调用。
@@ -6632,6 +6634,7 @@ const server = http.createServer(async (req, res) => {
 
   // 访问日志上下文：越早建立越好，否则早退的分支（鉴权失败、400）就没有记录。
   initAccess(req, res, url.pathname);
+  setAccess(res, 'clientIp', clientIp(req));
 
   // 后台请求先分流：它既不该占用数据面的在途配额，也不该受 MAX_INFLIGHT 影响。
   // SSE 日志流是长连接，若按数据面计数会永久占住一个槽位。
