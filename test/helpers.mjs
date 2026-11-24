@@ -34,7 +34,7 @@ hangGuard.unref?.();
 // 取一个当前空闲的端口：让内核分配（listen 0）后立刻释放。
 // 不能用 pid 派生区间 —— node --test 各文件并行，pid 取模会在不同 pid 间
 // 映射到同一区间（如 pid 100 与 pid 600 同桶），进而偶发 EADDRINUSE。
-// 内核分配把冲突面缩到「释放到重新占用」之间的极小窗口，调用方另有重试兜底。
+// 内核分配把冲突面缩到「释放到重新占用」之间的极小窗口，startProxy 另有 EADDRINUSE 重试兜底。
 import net from 'node:net';
 export async function allocPort() {
   return await new Promise((resolve, reject) => {
@@ -63,7 +63,6 @@ export async function closeServer(server, timeoutMs = 3000) {
 
 /** 启动一个 mock 上游。ndjson 为要回给代理的 CC NDJSON 行数组。 */
 export async function startMockUpstream(opts = {}) {
-  const port = await allocPort();
   const seen = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -93,7 +92,12 @@ export async function startMockUpstream(opts = {}) {
       res.end();
     });
   });
-  await new Promise(r => server.listen(port, '127.0.0.1', r));
+  // 直接 listen(0) 让内核原子分配端口，消除 allocPort → listen 之间的 TOCTOU 竞态
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address();
   return { port, seen, close: () => closeServer(server),
     // 最后一次 /alpha/generate 的请求体（wire 层断言的主要入口）
     lastGenerate: () => {
@@ -119,8 +123,6 @@ export function seedConfig(workdir, overrides = {}) {
 /** 在临时 cwd 中启动代理（复刻真实部署：proxy.mjs 与 config.json 同目录）。 */
 // execArgv 用于预加载 mock（--require）：NODE_OPTIONS 在 Bun 下不生效，命令行参数两边都认。
 export async function startProxy({ upstreamPort, env = {}, cwd, execArgv = [] } = {}) {
-  const port = await allocPort();
-  const logs = [];
   // 自建的临时工作目录用完必须删；调用方传了 cwd 则由调用方负责。
   const ownWorkdir = cwd === undefined;
   const workdir = cwd ?? mkdtempSync(join(tmpdir(), 'ccp-test-'));
@@ -136,30 +138,52 @@ export async function startProxy({ upstreamPort, env = {}, cwd, execArgv = [] } 
     // 发请求，模板若带上口令会直接进入严格鉴权模式。
     seedConfig(workdir);
   }
-  const childEnv = { ...process.env, PORT: String(port), HOST: '127.0.0.1',
-    CC_API_BASE: 'http://127.0.0.1:' + upstreamPort,
-    CC_USE_PROVIDER_MODELS: 'false',   // 不访问 /provider/v1/models
-    ...env };
-  // CC_ENV_FILE 是上面用来挡住「仓库根 .env」的哨兵，不能继承给子进程 ——
-  // 否则子进程会去找那个不存在的文件，读不到它自己工作目录里的 .env 用例。
-  delete childEnv.CC_ENV_FILE;
-  const child = spawn(process.execPath, [...execArgv, 'proxy.mjs'], {
-    cwd: workdir,
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', d => logs.push(d.toString()));
-  child.stderr.on('data', d => logs.push(d.toString()));
+
+  // 并行跑测试文件时，allocPort 释放端口到子进程真正 bind 之间有极小竞态窗口；
+  // 未显式指定 PORT 时遇到 EADDRINUSE 自动换新端口重试，避免 CI 偶发红灯。
+  const maxAttempts = env.PORT ? 1 : 5;
+  let port = 0;
+  let child = null;
+  let logs = [];
+  let up = false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    port = env.PORT ? Number(env.PORT) : await allocPort();
+    logs = [];
+    const childEnv = { ...process.env, PORT: String(port), HOST: '127.0.0.1',
+      CC_API_BASE: 'http://127.0.0.1:' + upstreamPort,
+      CC_USE_PROVIDER_MODELS: 'false',   // 不访问 /provider/v1/models
+      ...env };
+    // CC_ENV_FILE 是上面用来挡住「仓库根 .env」的哨兵，不能继承给子进程 ——
+    // 否则子进程会去找那个不存在的文件，读不到它自己工作目录里的 .env 用例。
+    delete childEnv.CC_ENV_FILE;
+    child = spawn(process.execPath, [...execArgv, 'proxy.mjs'], {
+      cwd: workdir,
+      env: childEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', d => logs.push(d.toString()));
+    child.stderr.on('data', d => logs.push(d.toString()));
+
+    const base = 'http://127.0.0.1:' + port;
+    up = false;
+    for (let i = 0; i < 80; i++) {
+      if (child.exitCode !== null) break;
+      try { const r = await fetch(base + '/health'); if (r.ok) { up = true; break; } } catch {}
+      await sleep(125);
+    }
+    if (up) break;
+
+    try { child.kill(); } catch {}
+    const out = logs.join('');
+    if (attempt < maxAttempts && out.includes('EADDRINUSE')) {
+      continue;
+    }
+    if (ownWorkdir) { try { rmSync(workdir, { recursive: true, force: true }); } catch {} }
+    throw new Error('proxy did not start:\n' + out);
+  }
 
   const base = 'http://127.0.0.1:' + port;
-  let up = false;
-  for (let i = 0; i < 80; i++) {
-    if (child.exitCode !== null) break;
-    try { const r = await fetch(base + '/health'); if (r.ok) { up = true; break; } } catch {}
-    await sleep(125);
-  }
-  if (!up) { child.kill(); throw new Error('proxy did not start:\n' + logs.join('')); }
-
   return {
     port, base, child, logs: () => logs.join(''),
     get: (path, init) => fetch(base + path, init),

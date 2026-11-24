@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { allocPort, closeServer, startProxy } from './helpers.mjs';
+import { closeServer, startProxy } from './helpers.mjs';
 import { createQuotaService } from '../lib/quota.mjs';
 
 const PASSWORD = 'hang-test-password';
@@ -77,7 +77,6 @@ function seedWorkdir({ apiBase, proxyAddr, quotaTimeoutMs = 1000 }) {
  *   mode === 'tunnel'   → 正常透传到目标 TCP 端口
  */
 async function startControllableConnectProxy(ctl) {
-  const port = await allocPort();
   const openSockets = new Set();
   let hits = 0;
   const server = http.createServer((req, res) => {
@@ -109,7 +108,11 @@ async function startControllableConnectProxy(ctl) {
     upstream.on('close', () => openSockets.delete(upstream));
     upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
   });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address();
   return {
     port,
     addr: `http://127.0.0.1:${port}`,
@@ -264,7 +267,6 @@ test('proxyFetch：CONNECT 后 TLS 握手期对端直接断开（EOF）时立刻
 // ── 端到端回归：拿到 HTTP 200 响应头后响应体卡死 ──────────
 
 test('proxyFetch + consumeProbeStream：经代理拿到 200 响应头后响应体卡死，刷新与预热均能超时退出并恢复', async () => {
-  const upstreamPort = await allocPort();
   const state = { stallQuota: true, stallWarmup: true };
   const stalledRes = new Set();
 
@@ -312,7 +314,11 @@ test('proxyFetch + consumeProbeStream：经代理拿到 200 响应头后响应�
       res.end();
     });
   });
-  await new Promise((r) => upstream.listen(upstreamPort, '127.0.0.1', r));
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const { port: upstreamPort } = upstream.address();
 
   const connectProxy = await startControllableConnectProxy({ mode: 'tunnel' });
   const apiBase = `http://127.0.0.1:${upstreamPort}`;
