@@ -1145,7 +1145,6 @@ async function consumeProbeStream(response, { timeoutMs = 45000, maxChars = 3000
         try { reader.cancel().catch(() => {}); } catch {}
         done(resolve, { done: true, value: undefined });
       }, remaining);
-      t.unref?.();
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
       reader.read().then(
         (res) => done(resolve, res),
