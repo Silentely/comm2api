@@ -168,3 +168,102 @@ test('413 报错包含实际请求体积（客户端要知道超了多少）', a
   } finally { await s.close(); }
 });
 
+test('入参校验：Chat 端点缺少/非法 messages 返回 400 fast-fail', async () => {
+  const s = await setup();
+  try {
+    const invalidBodies = [
+      {},
+      { messages: null },
+      { messages: 'string' },
+      { messages: [] },
+      { messages: {}, model: 'm' },
+    ];
+    for (const body of invalidBodies) {
+      // 携带 Auth
+      const r = await s.proxy.post('/v1/chat/completions', body, AUTH);
+      assert.equal(r.status, 400, `body ${JSON.stringify(body)} 应返回 400`);
+      const j = await r.json();
+      assert.equal(j.error?.type, 'invalid_request_error');
+      assert.equal(j.error?.message, 'messages is required and must be a non-empty array');
+
+      // 未携带 Auth（应在鉴权之前 Fast-Fail 400，而非 401）
+      const rNoAuth = await s.proxy.post('/v1/chat/completions', body);
+      assert.equal(rNoAuth.status, 400, `未携带 Auth 时 body ${JSON.stringify(body)} 仍应返回 400 而非 401`);
+      const jNoAuth = await rNoAuth.json();
+      assert.equal(jNoAuth.error?.type, 'invalid_request_error');
+      assert.equal(jNoAuth.error?.message, 'messages is required and must be a non-empty array');
+    }
+
+    // stream: true 与 stream: false 一致校验
+    for (const stream of [true, false]) {
+      const rStream = await s.proxy.post('/v1/chat/completions', { messages: [], stream }, AUTH);
+      assert.equal(rStream.status, 400);
+      const jStream = await rStream.json();
+      assert.equal(jStream.error?.type, 'invalid_request_error');
+      assert.equal(jStream.error?.message, 'messages is required and must be a non-empty array');
+    }
+  } finally { await s.close(); }
+});
+
+test('入参校验：Messages 端点缺少/非法 messages 返回 400 fast-fail', async () => {
+  const s = await setup();
+  const ANTHROPIC_AUTH = { 'x-api-key': 'user_test' };
+  try {
+    const invalidBodies = [
+      {},
+      { messages: null },
+      { messages: 'string' },
+      { messages: [] },
+      { messages: {}, model: 'm' },
+    ];
+    for (const body of invalidBodies) {
+      // 携带 Auth
+      const r = await s.proxy.post('/v1/messages', body, ANTHROPIC_AUTH);
+      assert.equal(r.status, 400, `body ${JSON.stringify(body)} 应返回 400`);
+      const j = await r.json();
+      assert.equal(j.type, 'error');
+      assert.equal(j.error?.type, 'invalid_request_error');
+      assert.equal(j.error?.message, 'messages: at least one message is required');
+
+      // 未携带 Auth（应在鉴权之前 Fast-Fail 400，而非 401）
+      const rNoAuth = await s.proxy.post('/v1/messages', body);
+      assert.equal(rNoAuth.status, 400, `未携带 Auth 时 body ${JSON.stringify(body)} 仍应返回 400 而非 401`);
+      const jNoAuth = await rNoAuth.json();
+      assert.equal(jNoAuth.type, 'error');
+      assert.equal(jNoAuth.error?.type, 'invalid_request_error');
+      assert.equal(jNoAuth.error?.message, 'messages: at least one message is required');
+    }
+
+    // stream: true 与 stream: false 一致校验
+    for (const stream of [true, false]) {
+      const rStream = await s.proxy.post('/v1/messages', { messages: [], stream }, ANTHROPIC_AUTH);
+      assert.equal(rStream.status, 400);
+      const jStream = await rStream.json();
+      assert.equal(jStream.type, 'error');
+      assert.equal(jStream.error?.type, 'invalid_request_error');
+      assert.equal(jStream.error?.message, 'messages: at least one message is required');
+    }
+  } finally { await s.close(); }
+});
+
+test('入参校验：缺少 model 时的合法兜底与非法 model 类型的测试', async () => {
+  const s = await setup();
+  const ANTHROPIC_AUTH = { 'x-api-key': 'user_test' };
+  try {
+    // 缺少 model 时使用合法兜底模型
+    const rChat = await s.proxy.post('/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    }, AUTH);
+    assert.equal(rChat.status, 200, 'Chat 缺少 model 应使用默认兜底模型成功完成');
+    await rChat.text();
+
+    const rMsg = await s.proxy.post('/v1/messages', {
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    }, ANTHROPIC_AUTH);
+    assert.equal(rMsg.status, 200, 'Messages 缺少 model 应使用默认兜底模型成功完成');
+    await rMsg.text();
+  } finally { await s.close(); }
+});

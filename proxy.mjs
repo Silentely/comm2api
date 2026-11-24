@@ -3639,6 +3639,11 @@ async function handleChatCompletions(req, res) {
     return;
   }
 
+  if (!openaiReq || typeof openaiReq !== 'object' || !Array.isArray(openaiReq.messages) || openaiReq.messages.length === 0) {
+    sendJSON(res, 400, { error: { message: 'messages is required and must be a non-empty array', type: 'invalid_request_error' } });
+    return;
+  }
+
   const auth = authenticate(req.headers);
   if (auth.error) {
     sendAuthError(res, auth.error, false, auth.detail);
@@ -4888,6 +4893,11 @@ async function handleMessages(req, res) {
       return;
     }
     sendAnthropicError(res, 400, 'invalid_request_error', 'Invalid JSON body');
+    return;
+  }
+
+  if (!anthropicReq || typeof anthropicReq !== 'object' || !Array.isArray(anthropicReq.messages) || anthropicReq.messages.length === 0) {
+    sendAnthropicError(res, 400, 'invalid_request_error', 'messages: at least one message is required');
     return;
   }
 
