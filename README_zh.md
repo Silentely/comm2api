@@ -20,7 +20,7 @@
 
 `comm2api` 是一个 Node.js 单进程服务，**后端零运行时依赖**。它把 Command Code 上游接口转换为标准的 **OpenAI Chat Completions**、**Anthropic Messages** 与 **OpenAI Responses API** 格式，并自带复古野兽派 Web 管理后台与官方额度感知调度能力。
 
-已针对官方 CLI 源码（`command-code@1.91.1`）进行 1:1 协议逆向与反检测对齐。
+已针对官方 CLI 源码（`command-code@1.93.2`）进行 1:1 协议逆向与反检测对齐。
 
 ---
 
@@ -111,7 +111,7 @@ curl http://127.0.0.1:3050/v1/chat/completions \
   -H "Authorization: Bearer ccp_your_token" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek/deepseek-v4-flash",
+    "model": "deepseek/deepseek-v4.1-flash",
     "messages": [{"role": "user", "content": "你好"}],
     "stream": true
   }'
@@ -121,7 +121,7 @@ curl http://127.0.0.1:3050/v1/chat/completions \
 
 - **API Base URL**：`http://<服务器IP>:3050/v1`
 - **API Key**：`ccp_your_token`
-- **Model**：填写支持的模型（如 `deepseek/deepseek-v4-flash`、`claude-sonnet-4-6`、`gpt-5.5` 等）
+- **Model**：填写支持的模型（如 `deepseek/deepseek-v4.1-flash`、`claude-sonnet-4-6`、`gpt-5.5` 等）
 
 ### 3. Claude Code / OpenCode
 
@@ -143,7 +143,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="deepseek/deepseek-v4-flash",
+    model="deepseek/deepseek-v4.1-flash",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )

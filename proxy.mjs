@@ -404,7 +404,7 @@ function selectAccountForRequest(auth, { headers = {}, promptCacheKey = null, re
   };
 }
 
-// ── 设备指纹（形态与哈希逐字对齐官方 CLI；1.53.1 对齐，1.91.1 复核未变） ──
+// ── 设备指纹（形态与哈希逐字对齐官方 CLI；1.53.1 对齐，1.93.2 复核未变） ──
 // CPU 型号与核数对应表（仅 Windows x64）。
 // ⚠️ 上网的 components.cpuCount 必须是 **threads** 而不是 cores ——
 // CLI 的 gatherRawSignals 取的是 `os.cpus().length`，即**逻辑处理器数**。
@@ -550,7 +550,7 @@ function generateFingerprint(apiKey) {
   };
 }
 
-// 本代理**实际实现**的 wire 协议版本（对齐 command-code@1.91.1 源码）。
+// 本代理**实际实现**的 wire 协议版本（对齐 command-code@1.93.2 源码）。
 // 真机发的永远是「形状 + 版本号」自洽的组合；如果版本号跟着 npm 走而形状没变，
 // 就变成「自称最新版、却说旧方言」—— 这比版本号过期更容易被行为分析挑出来。
 // 因此这里报的是协议版本，npm 上更新了只告警、不自动改。
@@ -584,7 +584,13 @@ function generateFingerprint(apiKey) {
 //   · stream 事件集（text-delta/tool-call/reasoning-delta/usage/cache-write-tokens 等）完全一致；
 //   · 设备指纹算法与 Salt 仍是 'command-code:device-fingerprint:v1'，字段集合不变；
 //   · 官方改动集中在 CLI 前端与交互（子 Agent 后台、GTA 主题、/goal 自动推进等），清理了未公开内部头。
-const CC_PROTOCOL_VERSION = '1.91.1';
+// 1.91.1 → 1.93.2 复核（比对官方 command-code@1.93.2 源码，结论：wire 协议契约零破坏性变化）：
+//   · 端点集合 25 个双向零增零减，核心生成与流式协议完全一致；
+//   · toWireMessages / toWireTools / toWireSystem / toWireToolOutput 协议结构保持一致；
+//   · stream 事件集与状态转换逻辑完全一致；
+//   · 设备指纹算法与 Salt 仍为 'command-code:device-fingerprint:v1'，字段集合不变；
+//   · 上游主要改动为客户端遥测打点扩充（telemetry additions）、性能优化与模型注册表更新。
+const CC_PROTOCOL_VERSION = '1.93.2';
 let CC_VERSION = CC_PROTOCOL_VERSION;
 const CC_VERSION_REFRESH_MS = 24 * 60 * 60 * 1000; // 24h — 检查一次是否发生漂移
 
@@ -950,41 +956,46 @@ async function ensureInitialized(apiKey, signal, route = undefined) {
 // ── 模型列表 ───────────────────────────────────────
 const MODELS = [
   // Anthropic
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', inputModalities: ['text', 'image'] },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', inputModalities: ['text', 'image'] },
+  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', inputModalities: ['text', 'image'] },
   // OpenAI
-  { id: 'gpt-5.5', name: 'GPT-5.5' },
-  { id: 'gpt-5.4', name: 'GPT-5.4' },
-  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.5', name: 'GPT-5.5', inputModalities: ['text', 'image'] },
+  { id: 'gpt-5.4', name: 'GPT-5.4', inputModalities: ['text', 'image'] },
+  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', inputModalities: ['text', 'image'] },
+  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', inputModalities: ['text'] },
   // DeepSeek
-  { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-  { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+  { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash (Recommended)', inputModalities: ['text'] },
+  { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', inputModalities: ['text'] },
+  { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash', inputModalities: ['text'] },
   // Kimi
-  { id: 'moonshotai/Kimi-K2.6', name: 'Kimi K2.6' },
-  { id: 'moonshotai/Kimi-K2.5', name: 'Kimi K2.5' },
+  { id: 'moonshotai/Kimi-K2.6', name: 'Kimi K2.6', inputModalities: ['text'] },
+  { id: 'moonshotai/Kimi-K2.5', name: 'Kimi K2.5', inputModalities: ['text'] },
   // GLM
-  { id: 'zai-org/GLM-5.1', name: 'GLM 5.1' },
-  { id: 'zai-org/GLM-5', name: 'GLM 5' },
+  { id: 'zai-org/GLM-5.1', name: 'GLM 5.1', inputModalities: ['text'] },
+  { id: 'zai-org/GLM-5', name: 'GLM 5', inputModalities: ['text'] },
   // MiniMax
-  { id: 'MiniMaxAI/MiniMax-M3', name: 'MiniMax M3' },
-  { id: 'MiniMaxAI/MiniMax-M2.7', name: 'MiniMax M2.7' },
-  { id: 'MiniMaxAI/MiniMax-M2.5', name: 'MiniMax M2.5' },
+  { id: 'MiniMaxAI/MiniMax-M3', name: 'MiniMax M3', inputModalities: ['text'] },
+  { id: 'MiniMaxAI/MiniMax-M2.7', name: 'MiniMax M2.7', inputModalities: ['text'] },
+  { id: 'MiniMaxAI/MiniMax-M2.5', name: 'MiniMax M2.5', inputModalities: ['text'] },
   // Qwen
-  { id: 'Qwen/Qwen3.6-Max-Preview', name: 'Qwen 3.6 Max Preview' },
-  { id: 'Qwen/Qwen3.6-Plus', name: 'Qwen 3.6 Plus' },
-  { id: 'Qwen/Qwen3.7-Max', name: 'Qwen 3.7 Max' },
+  { id: 'Qwen/Qwen3.6-Max-Preview', name: 'Qwen 3.6 Max Preview', inputModalities: ['text'] },
+  { id: 'Qwen/Qwen3.6-Plus', name: 'Qwen 3.6 Plus', inputModalities: ['text'] },
+  { id: 'Qwen/Qwen3.7-Max', name: 'Qwen 3.7 Max', inputModalities: ['text'] },
   // Step
-  { id: 'stepfun/Step-3.7-Flash', name: 'Step 3.7 Flash' },
-  { id: 'stepfun/Step-3.5-Flash', name: 'Step 3.5 Flash' },
+  { id: 'stepfun/Step-3.7-Flash', name: 'Step 3.7 Flash', inputModalities: ['text'] },
+  { id: 'stepfun/Step-3.5-Flash', name: 'Step 3.5 Flash', inputModalities: ['text'] },
   // Xiaomi
-  { id: 'xiaomi/mimo-v2.5-pro', name: 'MiMo V2.5 Pro' },
-  { id: 'xiaomi/mimo-v2.5', name: 'MiMo V2.5' },
+  { id: 'xiaomi/mimo-v2.5-pro', name: 'MiMo V2.5 Pro', inputModalities: ['text'] },
+  { id: 'xiaomi/mimo-v2.5', name: 'MiMo V2.5', inputModalities: ['text'] },
   // Gemini
-  { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
-  { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
+  { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash', inputModalities: ['text', 'image'] },
+  { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', inputModalities: ['text', 'image'] },
+  // Command Code Retired Models
+  { id: 'commandcode/beam-1.0', name: 'Beam 1.0 (Retired)', retired: true, inputModalities: ['text'] },
+  { id: 'commandcode/beam-1.0-free', name: 'Beam 1.0 Free (Retired)', retired: true, inputModalities: ['text'] },
+  { id: 'commandcode/laguna-s-2.1', name: 'Laguna S 2.1 (Retired)', retired: true, inputModalities: ['text'] },
 ];
 
 // 模型目录：从 CC 上游 /provider/v1/models 拉取（实测 82 个模型，带 context_length 与
@@ -1023,7 +1034,7 @@ const modelState = createModelState({ log: (...args) => log(...args) });
  *   3) 目录里第一个启用的模型；
  *   4) 最后才退回写死的 id（目录不可用时的保险）。
  *
- * 之前三处都是直接写死 'deepseek/deepseek-v4-flash' / 'claude-sonnet-4-6'：
+ * 之前三处都是直接写死 'deepseek/deepseek-v4.1-flash' / 'claude-sonnet-4-6'：
  * 一旦后台把那个模型禁用了，不带 model 的请求就会莫名其妙地 400。
  */
 function fallbackModel(hardcoded, endpoint = null) {
@@ -1774,7 +1785,7 @@ function buildCcRequest(openaiReq) {
     mode: CFG.cliMode || 'agent',
     // threadId 需为合法 UUID，否则整键省略（CLI 的 toWireThreadId）—— 在 forwardToCC 拿到 sessionId 后补
     params: {
-      model: model || 'deepseek/deepseek-v4-flash',
+      model: model || 'deepseek/deepseek-v4.1-flash',
       messages: ccMessages,
       // 三段夹逼，取小：
       //   1) 客户端要的（缺省 64000，对齐 CLI 的 VT = 64e3）；
@@ -3656,7 +3667,7 @@ async function handleChatCompletions(req, res) {
   // 用量账要挂到**最终**选定的账号上，所以传的是取当前值的函数
   const trackUsage = attachUsageRecording(res, () => apiKey);
   const stream = openaiReq.stream === true;
-  const model = openaiReq.model || fallbackModel('deepseek/deepseek-v4-flash', '/chat/completions');
+  const model = openaiReq.model || fallbackModel('deepseek/deepseek-v4.1-flash', '/chat/completions');
   setAccess(res, 'streaming', stream);
   setAccess(res, 'model', model);
   // 明确被禁用的模型直接拒掉：只在 /v1/models 里隐藏它是不够的 ——
@@ -4488,7 +4499,7 @@ function convertAnthropicToOpenAI(anthropicReq) {
 
   // 3. Build OpenAI request
   const openaiReq = {
-    model: anthropicReq.model || 'deepseek/deepseek-v4-flash',
+    model: anthropicReq.model || 'deepseek/deepseek-v4.1-flash',
     messages: openaiMessages,
     max_tokens: anthropicReq.max_tokens || 64000,
     stream: anthropicReq.stream === true,
@@ -6220,7 +6231,7 @@ async function handleResponses(req, res) {
 
   const trackUsage = attachUsageRecording(res, () => apiKey);
   const stream = chatReq.stream === true;
-  const model = chatReq.model || fallbackModel('deepseek/deepseek-v4-flash', '/chat/completions');
+  const model = chatReq.model || fallbackModel('deepseek/deepseek-v4.1-flash', '/chat/completions');
   setAccess(res, 'streaming', stream);
   setAccess(res, 'model', model);
   const disabledErr = disabledModelError(chatReq.model);

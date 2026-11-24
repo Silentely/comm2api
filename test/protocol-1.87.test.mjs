@@ -279,7 +279,7 @@ test('1.87.1 头部：不发 x-cli-surface / x-oss-primary-provider / x-cmd-prov
     for (const h of ['x-cli-surface', 'x-oss-primary-provider', 'x-cmd-provider-deepseek-internal']) {
       assert.ok(!(h in headers), `${h} 只有非普通会话才会发，代理不得发送`);
     }
-    assert.equal(headers['x-command-code-version'], '1.91.1', '版本号应与实现对齐');
+    assert.equal(headers['x-command-code-version'], '1.93.2', '版本号应与实现对齐');
   } finally { await s.close(); }
 });
 

@@ -68,7 +68,7 @@
 
 ## 反检测与硬件指纹伪装
 
-Command Code 官方 CLI 在运行时会上报设备特征以做风控和会话识别。`comm2api` 通过对官方 CLI（`command-code@1.91.1`）的网络流量与源码逆向分析，实现了 1:1 的防检测对齐：
+Command Code 官方 CLI 在运行时会上报设备特征以做风控和会话识别。`comm2api` 通过对官方 CLI（`command-code@1.93.2`）的网络流量与源码逆向分析，实现了 1:1 的防检测对齐：
 
 ### 1. 确定性设备指纹 (Deterministic Fingerprint)
 - **非随机生成**：每次重启或不同实例中，同一个 API Key 必须上报完全一致的设备硬件特征。
@@ -88,7 +88,7 @@ Command Code 官方 CLI 在运行时会上报设备特征以做风控和会话�
 - 会话 ID（Session ID）根据请求内容（Key + Model + System + 首段文本）哈希确定性生成，保持 Prompt 缓存断点最大化命中。
 
 ### 4. 协议版本号漂移告警
-- 请求头 `x-command-code-version` 真实回显代理所对齐的协议版本号（`1.91.1`）。
+- 请求头 `x-command-code-version` 真实回显代理所对齐的协议版本号（`1.93.2`）。
 - 当上游 npm 发布更高版本时，代理仅在日志中输出版本漂移告警（drift warning），绝不盲目假冒新版本号，防止协议格式不兼容引起封禁。
 
 ### 5. 字符编码安全（孤立代理项清洗）

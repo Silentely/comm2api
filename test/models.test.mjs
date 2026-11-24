@@ -1,3 +1,4 @@
+import { createModelCatalog } from '../lib/models.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -172,4 +173,26 @@ test('expired cache is used when refresh keeps failing', async () => {
     assert.equal(subscriptionCalls(s), 3, '过期后应尝试刷新');
     assert.equal(s.pricingCalls(), 3);
   } finally { await s.close(); }
+});
+
+test('createModelCatalog preserves inputModalities and retired status for static models', () => {
+  const catalog = createModelCatalog({
+    staticModels: [
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
+      { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', inputModalities: ['text'] },
+      { id: 'commandcode/beam-1.0', name: 'Beam 1.0 (Retired)', retired: true, inputModalities: ['text'] },
+    ],
+  });
+  const list = catalog.list();
+  const claude = list.find(m => m.id === 'claude-sonnet-4-6');
+  const ds = list.find(m => m.id === 'deepseek/deepseek-v4.1-flash');
+  const beam = list.find(m => m.id === 'commandcode/beam-1.0');
+
+  assert.deepEqual(claude?.inputModalities, ['text', 'image']);
+  assert.equal(claude?.retired, false);
+  assert.deepEqual(ds?.inputModalities, ['text']);
+  assert.equal(beam?.retired, true);
+  assert.equal(typeof catalog.modelSupportsVision, 'function');
+  assert.equal(catalog.modelSupportsVision('claude-sonnet-4-6'), true);
+  assert.equal(catalog.modelSupportsVision('deepseek/deepseek-v4.1-flash'), false);
 });

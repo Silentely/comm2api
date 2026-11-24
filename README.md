@@ -20,7 +20,7 @@
 
 `comm2api` is a single-process Node.js service with **zero runtime dependencies**. It bridges Command Code upstream APIs into standard **OpenAI Chat Completions**, **Anthropic Messages**, and **OpenAI Responses API** formats, featuring a retro-brutalist Web admin dashboard and official quota-aware scheduling.
 
-Rigorously reverse-engineered and aligned 1:1 with the official CLI source code (`command-code@1.91.1`).
+Rigorously reverse-engineered and aligned 1:1 with the official CLI source code (`command-code@1.93.2`).
 
 ---
 
@@ -111,7 +111,7 @@ curl http://127.0.0.1:3050/v1/chat/completions \
   -H "Authorization: Bearer ccp_your_token" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek/deepseek-v4-flash",
+    "model": "deepseek/deepseek-v4.1-flash",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -121,7 +121,7 @@ curl http://127.0.0.1:3050/v1/chat/completions \
 
 - **API Base URL**: `http://<server-ip>:3050/v1`
 - **API Key**: `ccp_your_token`
-- **Model**: Any supported model ID (e.g. `deepseek/deepseek-v4-flash`, `claude-sonnet-4-6`, `gpt-5.5`)
+- **Model**: Any supported model ID (e.g. `deepseek/deepseek-v4.1-flash`, `claude-sonnet-4-6`, `gpt-5.5`)
 
 ### 3. Claude Code / OpenCode
 
@@ -143,7 +143,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="deepseek/deepseek-v4-flash",
+    model="deepseek/deepseek-v4.1-flash",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )
