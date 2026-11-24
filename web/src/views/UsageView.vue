@@ -124,7 +124,8 @@ function qResetText(w, warmedAt = null) {
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const countdown = h > 0 ? `${h} 小时 ${m} 分后重置` : `${m} 分后重置`
-  return timeStr ? `${countdown}（${timeStr}）` : countdown
+  if (!w.resetEstimated) return timeStr ? `${countdown}（${timeStr}）` : countdown
+  return timeStr ? `${countdown}（${timeStr} · 按预热时间估算）` : `${countdown}（按预热时间估算）`
 }
 
 function quoteStateTone(acc) {
@@ -133,6 +134,11 @@ function quoteStateTone(acc) {
 }
 
 function quotaStateText(acc) {
+  // 数据过期时直接说明原因；只显示「额度未知」会让人以为从来没采集到过。
+  if (acc.state === 'quota_unknown') {
+    if (!acc.fetchedAt) return '尚未采集'
+    if (acc.stale) return '数据已过期'
+  }
   const map = {
     available: '可用', quota_warning: '接近上限', quota_exhausted: '额度耗尽',
     rate_limited: '限流中', proxy_unavailable: '代理不可用', auth_invalid: '鉴权失效',
@@ -427,7 +433,7 @@ onMounted(() => {
 
           <div v-for="acc in rankedAccounts" :key="acc.keyId" class="result-box" style="margin-bottom: 12px">
             <div class="title" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-              <span class="badge" :class="quoteStateTone(acc)">{{ quotaStateText(acc) }}</span>
+              <span class="badge" :class="quoteStateTone(acc)" :title="acc.stateLabel || ''">{{ quotaStateText(acc) }}</span>
               <span
                 v-if="quota.quotaRouting && !acc.blockReason"
                 class="badge"

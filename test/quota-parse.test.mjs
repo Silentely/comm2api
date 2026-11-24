@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSnapshot, parseCredits, parseIdentity, parseSubscriptions, parseUsageSummary,
-  toTimeMs, forecastBurn, createQuotaService,
+  toTimeMs, forecastBurn, createQuotaService, planTotalCredits,
 } from '../lib/quota.mjs';
 
 // ── 时间归一化 ─────────────────────────────────────
@@ -371,28 +371,48 @@ const REAL_USAGE = {
   periodBasis: 'billing-period', periodStart: '2026-10-26T06:00:16.000Z', daily: [],
 };
 
-test('真实结构：credits 嵌套子对象也能读出月度额度上限', () => {
+test('真实结构：credits 嵌套子对象也能读出月度剩余额度', () => {
   const c = parseCredits(REAL_CREDITS);
   assert.ok(c, '不能因为字段在 credits 子对象里就返回 null');
-  assert.equal(c.monthlyCap, 6.256775474);
-  assert.equal(c.remaining, null, '官方没有 remaining，就不能编一个出来');
+  assert.equal(c.monthlyRemaining, 6.256775474, 'monthlyCredits 是本月剩余，不是上限');
+  assert.equal(c.monthlyCap, undefined, '旧的“把剩余当上限”字段必须消失');
+  assert.equal(c.remaining, null, '官方没有 remaining 字段，就不能编一个出来');
   assert.equal(c.exhausted, false, 'remaining 未知不等于耗尽');
 });
 
-test('真实结构：月度窗口由 monthlyCredits + totalMonthlyCredits 合成', () => {
+test('真实结构：月度窗口用套餐总额度做分母，而不是剩余额度', () => {
   const s = buildSnapshot({
     whoami: REAL_WHOAMI, credits: REAL_CREDITS,
     subscriptions: REAL_SUBSCRIPTIONS, usage: REAL_USAGE,
     fetchedAt: 1_795_000_000_000, errors: {},
   });
   assert.ok(s.windows.monthly, '月度窗口必须能出来');
-  assert.equal(s.windows.monthly.cap, 6.256775474);
-  assert.equal(s.windows.monthly.used, 3.743224526);
+  assert.equal(s.windows.monthly.cap, 10, 'individual-go-v1 的官方月度总额度是 10');
+  assert.ok(Math.abs(s.windows.monthly.used - 3.743224526) < 1e-9, '已用 = 总额度 - 剩余额度');
   assert.equal(s.windows.monthly.partial, false, '两个数字都有 → 不算部分未知');
-  assert.ok(Math.abs(s.windows.monthly.percentUsed - 0.59827) < 0.001);
+  assert.ok(Math.abs(s.windows.monthly.percentUsed - 0.37432) < 0.001, '官方页面口径 ≈ 37%');
   assert.equal(s.windows.monthly.exceeded, false);
+  assert.equal(s.windows.monthly.source, 'credits+plan');
   // 重置时间取订阅周期结束
   assert.equal(s.windows.monthly.resetAtMs, Date.parse('2026-11-26T06:00:16.000Z'));
+});
+
+test('真实结构：没有套餐信息时用「已用 + 剩余」合成月度总额度', () => {
+  const s = buildSnapshot({
+    whoami: REAL_WHOAMI, credits: REAL_CREDITS, usage: REAL_USAGE, errors: {},
+  });
+  assert.ok(Math.abs(s.windows.monthly.cap - 10) < 1e-9);
+  assert.equal(s.windows.monthly.used, 3.743224526);
+  assert.equal(s.windows.monthly.partial, false);
+  assert.ok(Math.abs(s.windows.monthly.percentUsed - 0.37432) < 0.001);
+});
+
+test('套餐注册表：长 ID 优先匹配，未知套餐返回 null', () => {
+  assert.equal(planTotalCredits('individual-go-v1'), 10);
+  assert.equal(planTotalCredits('individual-pro-v1'), 80, '不能被 individual-pro 抢先匹配');
+  assert.equal(planTotalCredits('individual-ultra'), 300);
+  assert.equal(planTotalCredits('unknown-plan'), null);
+  assert.equal(planTotalCredits(null), null);
 });
 
 test('真实结构：套餐名来自 subscriptions.planId（whoami 没有 plan）', () => {
@@ -412,12 +432,65 @@ test('真实结构：五小时窗口 resetAt=0 视为未知，而不是 1970 年
   assert.equal(s.windows.weekly.resetAtMs, 1_795_524_195_609);
 });
 
-test('真实结构：只有上限没有已用时，月度窗口标记 partial 而不是补 0', () => {
+test('真实结构：只有剩余额度、没有套餐和已用时，不能拿剩余冒充月度上限', () => {
   const s = buildSnapshot({ credits: REAL_CREDITS, errors: {} });
-  assert.equal(s.windows.monthly.cap, 6.256775474);
+  assert.equal(s.windows.monthly.cap, null, '分母未知时保持 null');
   assert.equal(s.windows.monthly.used, null);
   assert.equal(s.windows.monthly.partial, true);
   assert.equal(s.windows.monthly.percentUsed, null, '不能把未知已用算成 0%');
+});
+
+test('五小时窗口：官方 resetAt=0 时用预热时间估算重置倒计时', async () => {
+  const clock = Date.parse('2026-11-23T12:00:00.000Z');
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async ({ name }) => {
+      const json = name === 'credits' ? REAL_CREDITS
+        : name === 'subscriptions' ? REAL_SUBSCRIPTIONS
+          : name === 'usage' ? REAL_USAGE : REAL_WHOAMI;
+      return { ok: true, status: 200, json };
+    },
+    warmup: async () => ({ ok: true, model: 'warm-gate' }),
+    now: () => clock,
+    persistence: false,
+    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true }),
+  });
+
+  await svc.refreshOne('a', { force: true });
+  let view = svc.list().find(x => x.keyId === 'a');
+  assert.equal(view.windows.fiveHour.resetAtMs, null, '官方未开窗时给的是 resetAt=0');
+
+  await svc.warmupOne('a', { reason: 'manual' });
+  view = svc.list().find(x => x.keyId === 'a');
+  assert.equal(view.windows.fiveHour.resetEstimated, true, '必须标记为估算值');
+  assert.equal(view.windows.fiveHour.resetAtMs, clock + 5 * 60 * 60 * 1000,
+    '预热开窗后按 5 小时寿命给出官方页面同款倒计时');
+});
+
+test('五小时窗口：官方 resetAt 晚于预热时间时保留官方值', async () => {
+  const clock = Date.parse('2026-11-23T12:00:00.000Z');
+  const officialReset = clock + 2 * 60 * 60 * 1000;
+  const credits = structuredClone(REAL_CREDITS);
+  credits.windowLimits.fiveHour = { used: 1, cap: 3, exceeded: false, resetAt: Math.floor(officialReset / 1000) };
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async ({ name }) => {
+      const json = name === 'credits' ? credits
+        : name === 'subscriptions' ? REAL_SUBSCRIPTIONS
+          : name === 'usage' ? REAL_USAGE : REAL_WHOAMI;
+      return { ok: true, status: 200, json };
+    },
+    warmup: async () => ({ ok: true, model: 'warm-gate' }),
+    now: () => clock,
+    persistence: false,
+    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true }),
+  });
+
+  await svc.refreshOne('a', { force: true });
+  await svc.warmupOne('a', { reason: 'manual' });
+  const view = svc.list().find(x => x.keyId === 'a');
+  assert.equal(view.windows.fiveHour.resetAtMs, officialReset);
+  assert.equal(view.windows.fiveHour.resetEstimated, undefined, '官方值可用时不能改成估算');
 });
 
 test('真实结构：用量汇总的 totalTokensIn/Out 与总花费都能读到', () => {

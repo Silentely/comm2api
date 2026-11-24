@@ -68,7 +68,8 @@ Command Code 的套餐额度（尤其是 Go $1 的五小时窗口）是官方口
 - 官方给了 `resetAt` 且已到点 → 重置后开下一轮（`auto_reset`）；
 - 官方**没给** `resetAt`（实测未开窗时返回 `resetAt: 0`）→ 视为冷账号主动开窗（`auto_open`）。
   这类账号没有重置时间可等，只认 `resetAt` 会永远停在「重置时间未知」；
-- 开窗后官方仍不给 `resetAt` 时，按 5 小时窗口寿命兜底再开一次，不会每轮都打上游；
+- 开窗后官方仍不给 `resetAt` 时，按「预热时间 + 5 小时」给出估算重置时间
+  （标记 `resetEstimated`，前端显示「按预热时间估算」），同时按 5 小时窗口寿命兜底再开一次；
 - 同一账号 30 分钟内不重复开窗，失败按指数退避（60s 起，上限 30 分钟）；
 - 窗口已明确耗尽、代理不可用、鉴权失效或限流中都不预热；
 - 冷窗口的开窗判断**不依赖**额度快照是否「过期」——采集间隔可以长于过期阈值，
@@ -76,6 +77,18 @@ Command Code 的套餐额度（尤其是 Go $1 的五小时窗口）是官方口
 - 自动预热并发上限为 2，多个冷账号会分轮开窗。
 
 手动入口：`POST /admin/api/quota/warmup`（`{ id }` 单个，空 body 全部）。
+
+## 4.2 月度窗口口径
+
+`/alpha/billing/credits` 返回的 `credits.monthlyCredits` 是**本月剩余额度**，不是上限。
+月度百分比的分母优先级：
+
+1. 套餐注册表里的总额度（`individual-go-v1` = 10，见 `lib/quota.mjs` 的 `PLAN_TOTAL_CREDITS`）；
+2. 没有套餐信息时，用官方已用（`usage/summary` 的 `totalMonthlyCredits`）+ 剩余合成；
+3. 两者都没有时保持 `null`，显示「部分未知」，不拿剩余额度冒充 100%。
+
+已用 = 总额度 − 剩余额度，因此 `individual-go-v1` 会显示 `2.206 / 10`（22%），
+与官方页面的 Monthly Limit 一致；重置时间仍取订阅的 `currentPeriodEnd`。
 
 ## 5. 调度优先级
 

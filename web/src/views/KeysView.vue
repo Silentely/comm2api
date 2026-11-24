@@ -304,6 +304,11 @@ function quotaStateTone(k) {
 function quotaStateLabel(k) {
   const q = quotaOf(k)
   if (!q) return '未采集'
+  // 数据过期时直接说明原因；只显示「额度未知」会让人以为从来没采集到过。
+  if (q.state === 'quota_unknown') {
+    if (!q.fetchedAt) return '尚未采集'
+    if (q.stale) return '数据已过期'
+  }
   const map = {
     available: '可用', quota_warning: '接近上限', quota_exhausted: '额度耗尽',
     rate_limited: '限流中', proxy_unavailable: '代理不可用', auth_invalid: '鉴权失效',
@@ -611,7 +616,7 @@ onUnmounted(() => {
                     ></div>
                   </div>
                   <div class="text-dim" style="font-size: 11px">
-                    <span class="badge" :class="quotaStateTone(k)">{{ quotaStateLabel(k) }}</span>
+                    <span class="badge" :class="quotaStateTone(k)" :title="k.quota.stateLabel || ''">{{ quotaStateLabel(k) }}</span>
                     <span v-if="k.quota.plan" style="margin-left: 4px">{{ k.quota.plan }}</span>
                   </div>
                   <div class="text-dim" style="font-size: 11px">
@@ -628,7 +633,8 @@ onUnmounted(() => {
                   <div class="mono">{{ resetLeft(k) > 0 ? fmtRemaining(resetLeft(k)) : (isWarmedNow(k) ? '已开窗待上报' : '即将重置') }}</div>
                   <div v-if="fiveHour(k)?.resetAtMs" class="text-dim mono" style="font-size: 11px">
                     {{ fmtResetTime(fiveHour(k).resetAtMs) }}
-                    <span v-if="resetPassed(k)">（官方未刷新）</span>
+                    <span v-if="fiveHour(k).resetEstimated">（按预热时间估算）</span>
+                    <span v-else-if="resetPassed(k)">（官方未刷新）</span>
                   </div>
                 </div>
                 <div v-else class="text-dim">
