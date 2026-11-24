@@ -24,7 +24,7 @@ import { createKeyPool } from './lib/keys.mjs';
 import { createProxyPool, redactProxyUrl as redactPoolProxyUrl, parseProxyEntry } from './lib/proxies.mjs';
 import { createApiKeyPool, looksLikeUpstreamKey } from './lib/api-keys.mjs';
 import { createAdminAuth } from './lib/admin-auth.mjs';
-import { createModelCatalog, createModelTestRunner, classifyProbe } from './lib/models.mjs';
+import { createModelCatalog, createModelTestRunner, classifyProbe, modelSupportsVision } from './lib/models.mjs';
 import { createModelState } from './lib/model-state.mjs';
 import { createAdminApi, clientIp } from './lib/admin-api.mjs';
 // 额度感知调度相关的四个模块（全部可独立关闭：关掉就等于升级前的行为）
@@ -3641,6 +3641,226 @@ function decodeWebSearchResultBlocks(content) {
   }).join('\n\n');
 }
 
+// ── Vision Fallback（纯文本模型多模态辅助识图降级）────────────
+
+function extractImageInfo(part) {
+  if (!part || typeof part !== 'object') return null;
+  if (part.type === 'image_url') {
+    const url = typeof part.image_url === 'string' ? part.image_url : (part.image_url?.url || '');
+    if (url) return { url };
+  }
+  if (part.type === 'image') {
+    if (typeof part.image === 'string' && part.image) {
+      return { url: part.image };
+    }
+    if (part.source?.type === 'base64' && part.source.data) {
+      const mediaType = part.source.media_type || 'image/png';
+      return { url: `data:${mediaType};base64,${part.source.data}` };
+    }
+    if (part.source?.url) {
+      return { url: part.source.url };
+    }
+  }
+  return null;
+}
+
+function hasImageContent(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const msg of messages) {
+    if (!msg) continue;
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (extractImageInfo(part)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function shouldApplyVisionFallback(model, openaiReq, origReq = null) {
+  if (!CFG.visionFallbackModel) return false;
+  // 递归熔断保证：带有 _isVisionHelper 标记的请求坚决跳过辅助识图逻辑，杜绝自递归
+  if (openaiReq?._isVisionHelper || origReq?._isVisionHelper) return false;
+  if (modelSupportsVision(model, catalog)) return false;
+  return hasImageContent(openaiReq?.messages);
+}
+
+async function readStreamText(stream, signal) {
+  if (!stream) return '';
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let streamError = null;
+
+  try {
+    while (true) {
+      if (signal?.aborted) throw (signal.reason || new Error('Aborted'));
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        let line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line || line.startsWith(':') || line === '[DONE]') continue;
+        if (line.startsWith('data:')) line = line.slice(5).trim();
+        if (!line || line === '[DONE]') continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'text-delta' && typeof ev.text === 'string') {
+          text += ev.text;
+        } else if (ev.type === 'error') {
+          streamError = ev.error?.message || ev.error?.code || JSON.stringify(ev.error || ev);
+          break;
+        }
+      }
+      if (streamError) break;
+    }
+  } finally {
+    try { await reader.cancel(); } catch {}
+  }
+  if (streamError) throw new Error(streamError);
+  if (!text && buffer.trim()) {
+    try {
+      const data = JSON.parse(buffer.trim());
+      if (data?.text) text = data.text;
+      else if (data?.choices?.[0]?.message?.content) text = data.choices[0].message.content;
+      else if (data?.content?.[0]?.text) text = data.content[0].text;
+    } catch {}
+  }
+  return text;
+}
+
+async function transcribeImage({ imageUrl, apiKey, proxyAddress, signal, index }) {
+  const timeoutSignal = AbortSignal.timeout(10000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+  try {
+    const helperReq = {
+      _isVisionHelper: true,
+      model: CFG.visionFallbackModel,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Describe this image in detail for a text-only AI model. Focus on layout, visual elements, text, diagrams, code, and key semantic information.',
+            },
+            {
+              type: 'image_url',
+              image_url: { url: imageUrl },
+            },
+          ],
+        },
+      ],
+      max_tokens: 2000,
+      stream: true,
+    };
+
+    const helperCcBody = buildCcRequest(helperReq);
+    helperCcBody._isVisionHelper = true;
+
+    const response = await forwardToCC(
+      helperCcBody,
+      apiKey,
+      { 'x-vision-helper': 'true' },
+      combinedSignal,
+      undefined,
+      proxyAddress
+    );
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(`HTTP ${response.status} ${errText.slice(0, 100)}`);
+    }
+
+    const description = await readStreamText(response.body, combinedSignal);
+    if (!description || !description.trim()) {
+      throw new Error('empty description received');
+    }
+    return { ok: true, text: description.trim() };
+  } catch (err) {
+    const reason = err.name === 'TimeoutError' || (combinedSignal.aborted && timeoutSignal.aborted)
+      ? 'timeout'
+      : (err.message || 'unknown error');
+    return { ok: false, reason };
+  }
+}
+
+async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, signal }) {
+  if (!openaiReq || !Array.isArray(openaiReq.messages)) return;
+
+  const imageEntries = [];
+  let imageIndex = 1;
+
+  for (let mIdx = 0; mIdx < openaiReq.messages.length; mIdx++) {
+    const msg = openaiReq.messages[mIdx];
+    if (!msg || !Array.isArray(msg.content)) continue;
+    for (let pIdx = 0; pIdx < msg.content.length; pIdx++) {
+      const part = msg.content[pIdx];
+      const imgInfo = extractImageInfo(part);
+      if (imgInfo) {
+        imageEntries.push({
+          mIdx,
+          pIdx,
+          imageUrl: imgInfo.url,
+          index: imageIndex++,
+        });
+      }
+    }
+  }
+
+  if (imageEntries.length === 0) return;
+
+  log('info', 'Executing vision fallback for images', {
+    count: imageEntries.length,
+    model: CFG.visionFallbackModel,
+  });
+
+  const concurrency = Math.min(3, imageEntries.length);
+  let nextQueueIdx = 0;
+  const results = new Array(imageEntries.length);
+
+  const worker = async () => {
+    while (nextQueueIdx < imageEntries.length) {
+      if (signal?.aborted) return;
+      const currentIdx = nextQueueIdx++;
+      const entry = imageEntries[currentIdx];
+      results[currentIdx] = await transcribeImage({
+        imageUrl: entry.imageUrl,
+        apiKey,
+        proxyAddress,
+        signal,
+        index: entry.index,
+      });
+    }
+  };
+
+  const workers = Array.from({ length: concurrency }, () => worker());
+  await Promise.all(workers);
+
+  if (signal?.aborted) return;
+
+  for (let i = 0; i < imageEntries.length; i++) {
+    const { mIdx, pIdx, index } = imageEntries[i];
+    const res = results[i];
+    let textReplacement;
+    if (res && res.ok) {
+      textReplacement = `<image_description index="${index}">\n${res.text}\n</image_description>`;
+    } else {
+      const reason = res?.reason || 'transcription failed';
+      textReplacement = `[Image transcription failed: ${reason}]`;
+    }
+
+    openaiReq.messages[mIdx].content[pIdx] = {
+      type: 'text',
+      text: textReplacement,
+    };
+  }
+}
+
 // ── 路由 ────────────────────────────────────────────
 
 async function handleChatCompletions(req, res) {
@@ -3689,16 +3909,7 @@ async function handleChatCompletions(req, res) {
   // 上面 fallbackModel() 算出的兜底模型只会进入日志，实际发出去的仍是写死的那个 id。
   openaiReq.model = model;
 
-  // 构建 CC 请求体
-  const ccBody = buildCcRequest(openaiReq);
-  // issue #20：ccBody 建好后，openaiReq 这棵 20MB 级对象树只剩 prompt_cache_key 还被用到。
-  // 先取出该值再断开引用，让这一份副本可以更早被 GC 回收（原来是整段请求期间一直活着）。
   const promptCacheKey = openaiReq.prompt_cache_key;
-  openaiReq = null;
-
-  // 连续超时的作用域：优先用客户端给的会话标识，没有就按内容派生。
-  // forwardToCC 里会再算一次同样的值 —— 这里先取是为了让超时计数按会话隔离。
-  const sessionKey = getSessionId(req.headers, apiKey, promptCacheKey, ccBody).id;
 
   // ── 最终选定账号（额度可用性 > 严格代理 > 会话粘性 > 负载均衡）──
   const account = selectAccountForRequest(auth, { headers: req.headers, promptCacheKey, res });
@@ -3707,6 +3918,16 @@ async function handleChatCompletions(req, res) {
     return;
   }
   apiKey = account.key;
+
+  let proxyAddress = null;
+  try {
+    proxyAddress = proxyAddressFor(apiKey);
+  } catch (err) {
+    if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
+      sendAuthError(res, err.message, false, 'proxy_unavailable');
+      return;
+    }
+  }
 
   // AbortController 用于客户端断连时真正打断 CC 上游（pi-commandcode-provider 模式）
   // 每次尝试都换一个新的（已 abort 的 signal 不可复用）
@@ -3739,12 +3960,6 @@ async function handleChatCompletions(req, res) {
   };
 
   // 下游断连检测：打断 CC 上游 + 记录日志 —— 必须挂在重试循环**之前**、无条件注册恰好一次。
-  // #50 初版把它放在「attempt === 1 且已拿到上游响应头」的分支里：而第 1 次尝试恰恰可能在
-  // 响应头之前就闪断（这正是重试特性要处理的场景），该分支永远走不到，之后所有尝试便
-  // 再也没有断连监听 —— 客户端已断开仍会继续打上游（白烧额度 / 放大 QPS），还会把
-  // 「对着空气交付」误记成 retry recovered（issue #55）。
-  // 回调读的 abortController 是每次尝试重绑的 let，闭包取到的永远是当前尝试的控制器，
-  // 所以注册一次即可，重试不需要重复挂载。
   res.on('close', () => {
     if (res.writableEnded) return; // Normal completion, not a disconnect
     aborted = true;
@@ -3780,6 +3995,26 @@ async function handleChatCompletions(req, res) {
       try { abortController.abort(); } catch {}
     }
   });
+
+  // 纯文本模型多模态辅助识图降级（Vision Fallback）
+  if (shouldApplyVisionFallback(model, openaiReq)) {
+    await applyVisionFallback(openaiReq, {
+      apiKey,
+      proxyAddress,
+      signal: abortController.signal,
+    });
+  }
+  if (aborted || abortController.signal.aborted) return;
+
+  // 构建 CC 请求体
+  const ccBody = buildCcRequest(openaiReq);
+  // issue #20：ccBody 建好后，openaiReq 这棵 20MB 级对象树只剩 prompt_cache_key 还被用到。
+  // 先取出该值再断开引用，让这一份副本可以更早被 GC 回收（原来是整段请求期间一直活着）。
+  openaiReq = null;
+
+  // 连续超时的作用域：优先用客户端给的会话标识，没有就按内容派生。
+  // forwardToCC 里会再算一次同样的值 —— 这里先取是为了让超时计数按会话隔离。
+  const sessionKey = getSessionId(req.headers, apiKey, promptCacheKey, ccBody).id;
 
   // 上游闪断重试循环：只在「传输层闪断」且「尚未向下游写出任何字节」时
   // 才再来一遍；正常路径第一轮即 break。循环体沿用原有缩进、未做重排，只为把 diff 控到最小。
@@ -4976,6 +5211,9 @@ async function handleMessages(req, res) {
   let openaiReq = convertAnthropicToOpenAI(anthropicReq);
   // 同 chat：buildCcRequest 读的是这个对象的 model，兜底结果必须写回去才生效
   openaiReq.model = model;
+  if (anthropicReq._isVisionHelper) {
+    openaiReq._isVisionHelper = true;
+  }
   if (!stream && openaiReq._serverTools) {
     // 搜索循环只实现了流式（Claude Code 只走流式）；非流式退回剥掉服务端工具
     const names = new Set(Object.keys(openaiReq._serverTools));
@@ -4983,16 +5221,6 @@ async function handleMessages(req, res) {
     if (!openaiReq.tools.length) delete openaiReq.tools;
     delete openaiReq._serverTools;
   }
-  let ccBody = buildCcRequest(openaiReq); // 搜索循环每轮追加历史后重建
-  // issue #20：原始请求树（anthropicReq）在此之后不再被引用，显式断开以便尽早回收。
-  // 但 **openaiReq 不能置空** —— PR #46 的搜索循环要往它的 messages/tools 上追加历史
-  // 并重建 ccBody；issue #20 里置空它的前提（只剩 prompt_cache_key 还被用到）已不成立。
-  anthropicReq = null;
-
-  // 连续超时的作用域：优先用客户端给的会话标识，没有就按内容派生（与 chat 路径同一口径）。
-  // 这里的 promptCacheKey 恒为 undefined —— Anthropic 协议没有这个字段，本路径的
-  // forwardWithKeyRetry 也不传它，所以两边算出来的 session 才是同一个。
-  const sessionKey = getSessionId(req.headers, apiKey, undefined, ccBody).id;
 
   // 最终选定账号（见 selectAccountForRequest 的注释）
   const account = selectAccountForRequest(auth, { headers: req.headers, res });
@@ -5002,6 +5230,16 @@ async function handleMessages(req, res) {
   }
   apiKey = account.key;
 
+  let proxyAddress = null;
+  try {
+    proxyAddress = proxyAddressFor(apiKey);
+  } catch (err) {
+    if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
+      sendAuthError(res, err.message, true, 'proxy_unavailable');
+      return;
+    }
+  }
+
   const abortController = new AbortController();
   let aborted = false;
   // 提前初始化，断连回调/超时 catch 安全引用（避免块级作用域 ReferenceError）
@@ -5009,6 +5247,52 @@ async function handleMessages(req, res) {
   let messageId = '';
   let reader = null;
   let bytesReceived = 0; let lastCcEvent = ''; let fullText = '';
+
+  // 下游断连检测：打断 CC 上游 + 记录日志
+  res.on('close', () => {
+    if (res.writableEnded) return; // Normal completion, not a disconnect
+    aborted = true;
+    setAccess(res, 'outcome', 'client_disconnected');
+    if (!abortController.signal.aborted) {
+      if (res.headersSent && stream) {
+        // 断连前抢发 usage=0 终止事件，避免下游自行估算 token
+        try {
+          res.write(`event: message_delta\ndata: ${JSON.stringify({
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 0, input_tokens: 0, cache_read_input_tokens: 0 },
+          })}\n\n`);
+          res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+        } catch {}
+      }
+      try { abortController.abort(); } catch {}
+    }
+    log('warn', 'Client disconnected', {
+      path: '/v1/messages',
+      model,
+      messageId,
+      streaming: stream,
+      elapsedMs: Date.now() - startTime,
+    });
+  });
+
+  // 纯文本模型多模态辅助识图降级（Vision Fallback）
+  if (shouldApplyVisionFallback(model, openaiReq, anthropicReq)) {
+    await applyVisionFallback(openaiReq, {
+      apiKey,
+      proxyAddress,
+      signal: abortController.signal,
+    });
+  }
+  if (aborted || abortController.signal.aborted) return;
+
+  let ccBody = buildCcRequest(openaiReq); // 搜索循环每轮追加历史后重建
+  anthropicReq = null;
+
+  // 连续超时的作用域：优先用客户端给的会话标识，没有就按内容派生（与 chat 路径同一口径）。
+  // 这里的 promptCacheKey 恒为 undefined —— Anthropic 协议没有这个字段，本路径的
+  // forwardWithKeyRetry 也不传它，所以两边算出来的 session 才是同一个。
+  const sessionKey = getSessionId(req.headers, apiKey, undefined, ccBody).id;
 
   try {
     // 转发到 CC API（遇 Key 失效/限流自动换 Key 重试）
@@ -5027,32 +5311,6 @@ async function handleMessages(req, res) {
       sendAnthropicError(res, mapped.status, mapped.body.error.type, mapped.body.error.message);
       return;
     }
-
-    // 下游断连检测：打断 CC 上游 + 记录日志
-    res.on('close', () => {
-      if (res.writableEnded) return; // Normal completion, not a disconnect
-      aborted = true;
-      setAccess(res, 'outcome', 'client_disconnected');
-      if (!abortController.signal.aborted) {
-        // 断连前抢发 usage=0 终止事件，避免下游自行估算 token
-        try {
-          res.write(`event: message_delta\ndata: ${JSON.stringify({
-            type: 'message_delta',
-            delta: { stop_reason: 'end_turn' },
-            usage: { output_tokens: 0, input_tokens: 0, cache_read_input_tokens: 0 },
-          })}\n\n`);
-          res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
-        } catch {}
-        try { abortController.abort(); } catch {}
-      }
-      log('warn', 'Client disconnected', {
-        path: '/v1/messages',
-        model,
-        messageId,
-        streaming: stream,
-        elapsedMs: Date.now() - startTime,
-      });
-    });
 
     if (stream) {
       // ── 流式 Anthropic SSE ──
