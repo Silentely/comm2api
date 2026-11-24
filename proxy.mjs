@@ -33,6 +33,10 @@ import { unavailabilitySummary, retryAfterSecFor, rankAccount } from './lib/quot
 import { createSessionAffinity, resolveSessionId } from './lib/session-affinity.mjs';
 import { createAlerter } from './lib/alerts.mjs';
 import { createUsageAnalytics } from './lib/usage-analytics.mjs';
+import {
+  guardFetchUrl, executeWebFetch, formatFetchOutput, decodeWebFetchResultBlocks,
+  WEB_FETCH_ROUTE, WEB_FETCH_SCHEMA, DEFAULT_WEB_FETCH_MAX_USES,
+} from './lib/web-fetch.mjs';
 
 // 本分支的配置统一由 lib/config.mjs 承担（分层：env > data/settings.json >
 // config.json > 默认值），proxy.mjs 里不再有 loadConfig()。
@@ -4348,7 +4352,9 @@ function buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage,
 // 经 CC 上游时只能由本 proxy 代为执行（web_search 已实现，见 executeWebSearch）或剥掉。
 const SERVER_TOOL_TYPES = {
   web_search_20250305: 'web_search',
+  web_search: 'web_search',
   web_fetch_20250910: 'web_fetch',
+  web_fetch: 'web_fetch',
 };
 const DEFAULT_WEB_SEARCH_MAX_USES = 5;
 const strippedServerToolWarned = new Set();
@@ -4441,6 +4447,15 @@ function convertAnthropicToOpenAI(anthropicReq) {
             content: decodeWebSearchResultBlocks(block.content),
           });
           pushedAny = true;
+        } else if (block.type === 'web_fetch_tool_result') {
+          flushAssistant();
+          openaiMessages.push({
+            role: 'tool',
+            tool_call_id: block.tool_use_id,
+            name: toolNameFromId[block.tool_use_id] || 'web_fetch',
+            content: decodeWebFetchResultBlocks(block.content),
+          });
+          pushedAny = true;
         }
       }
       flushAssistant();
@@ -4514,32 +4529,51 @@ function convertAnthropicToOpenAI(anthropicReq) {
     const serverTools = {};
     const mapped = [];
     for (const t of anthropicReq.tools) {
-      const serverKind = SERVER_TOOL_TYPES[t.type];
+      const serverKind = SERVER_TOOL_TYPES[t.type] || (!t.input_schema && SERVER_TOOL_TYPES[t.name]);
       if (serverKind) {
-        if (!CFG.webSearch || serverKind !== 'web_search') {
-          warnServerToolStripped(t.type);
+        if (!CFG.webSearch) {
+          warnServerToolStripped(t.type || t.name);
           continue;
         }
-        serverTools[t.name] = {
-          kind: serverKind,
-          maxUses: Number.isInteger(t.max_uses) && t.max_uses > 0 ? t.max_uses : DEFAULT_WEB_SEARCH_MAX_USES,
-          allowedDomains: Array.isArray(t.allowed_domains) && t.allowed_domains.length ? t.allowed_domains : null,
-          blockedDomains: Array.isArray(t.blocked_domains) && t.blocked_domains.length ? t.blocked_domains : null,
-          used: 0,
-        };
-        mapped.push({
-          type: 'function',
-          function: {
-            name: t.name,
-            description: 'Search the web for current information. Returns a numbered list of results with title, URL and snippet. Use it when the answer depends on recent events or facts you are not certain about.',
-            parameters: {
-              type: 'object',
-              properties: { query: { type: 'string', description: 'The search query' } },
-              required: ['query'],
+        const toolName = t.name || serverKind;
+        if (serverKind === 'web_fetch') {
+          serverTools[toolName] = {
+            kind: serverKind,
+            maxUses: Number.isInteger(t.max_uses) && t.max_uses > 0 ? t.max_uses : DEFAULT_WEB_FETCH_MAX_USES,
+            used: 0,
+          };
+          mapped.push({
+            type: 'function',
+            function: {
+              name: toolName,
+              description: WEB_FETCH_SCHEMA.description,
+              parameters: WEB_FETCH_SCHEMA.input_schema,
             },
-          },
-        });
-        continue;
+          });
+          continue;
+        }
+        if (serverKind === 'web_search') {
+          serverTools[toolName] = {
+            kind: serverKind,
+            maxUses: Number.isInteger(t.max_uses) && t.max_uses > 0 ? t.max_uses : DEFAULT_WEB_SEARCH_MAX_USES,
+            allowedDomains: Array.isArray(t.allowed_domains) && t.allowed_domains.length ? t.allowed_domains : null,
+            blockedDomains: Array.isArray(t.blocked_domains) && t.blocked_domains.length ? t.blocked_domains : null,
+            used: 0,
+          };
+          mapped.push({
+            type: 'function',
+            function: {
+              name: toolName,
+              description: 'Search the web for current information. Returns a numbered list of results with title, URL and snippet. Use it when the answer depends on recent events or facts you are not certain about.',
+              parameters: {
+                type: 'object',
+                properties: { query: { type: 'string', description: 'The search query' } },
+                required: ['query'],
+              },
+            },
+          });
+          continue;
+        }
       }
       mapped.push({
         type: 'function',
@@ -4735,9 +4769,9 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
             const name = event.toolName || '';
             const input = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {});
 
-            // 服务端工具（web_search）：不当客户端 tool_use 下发——客户端没有它的处理器——
-            // 改发 Anthropic 的 server_tool_use 块，并登记到 ctx.pendingSearches 交给
-            // handleMessages 的搜索循环执行。本轮不终结消息（见 finalize 处的早退）。
+            // 服务端工具（web_search / web_fetch）：不当客户端 tool_use 下发——客户端没有它的处理器——
+            // 改发 Anthropic 的 server_tool_use 块，并登记到 ctx.pendingServerTools 交给
+            // handleMessages 的统一工具循环执行。本轮不终结消息（见 finalize 处的早退）。
             if (ctx.serverTools && ctx.serverTools[name]) {
               const srvId = 'srvtoolu_' + randomUUID().slice(0, 12);
               const srvIndex = nextBlockIndex++;
@@ -4746,12 +4780,14 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
               yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: srvIndex })}\n\n`;
               outputTokens += 20;
               hadOutput = true;
-              (ctx.pendingSearches ||= []).push({
+              const pendingItem = {
                 id: srvId,                                    // 发给客户端的 id（回放时客户端原样带回）
                 name,
                 input: tryParseJSON(input),
                 upstreamToolCallId: event.toolCallId || srvId, // 追加历史时对齐上游生成的 id
-              });
+              };
+              (ctx.pendingServerTools ||= []).push(pendingItem);
+              (ctx.pendingSearches ||= []).push(pendingItem);
               break;
             }
 
@@ -4835,7 +4871,7 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
 
       // 搜索循环：本轮有待执行的服务端工具调用 → 不发 message_delta / message_stop，
       // 把本轮 usage 累进 ctx.usageCarry，由 handleMessages 执行搜索后开下一轮续写。
-      if (ctx.pendingSearches && ctx.pendingSearches.length) {
+      if ((ctx.pendingServerTools && ctx.pendingServerTools.length) || (ctx.pendingSearches && ctx.pendingSearches.length)) {
         const c = (ctx.usageCarry ||= { input: 0, output: 0, cached: 0, cacheWrite: 0 });
         c.input += noCacheTokens >= 0 ? noCacheTokens : Math.max(0, inputTokens - cachedInputTokens - (cacheWriteTokens || 0));
         c.output += outputTokens;
@@ -4867,7 +4903,11 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
             ? noCacheTokens
             : Math.max(0, inputTokens - cachedInputTokens - (cacheWriteTokens || 0))) + carry.input,
         };
-        if (ctx.searchCount) finalUsage.server_tool_use = { web_search_requests: ctx.searchCount };
+        if (ctx.searchCount || ctx.fetchCount) {
+          finalUsage.server_tool_use = {};
+          if (ctx.searchCount) finalUsage.server_tool_use.web_search_requests = ctx.searchCount;
+          if (ctx.fetchCount) finalUsage.server_tool_use.web_fetch_requests = ctx.fetchCount;
+        }
         yield `event: message_delta\ndata: ${JSON.stringify({
           type: 'message_delta',
           delta: { stop_reason: stopReason || 'end_turn' },
@@ -5055,9 +5095,10 @@ async function handleMessages(req, res) {
         messageId = 'msg_' + randomUUID().slice(0, 12);
         ctx = {
           bytesReceived: 0, lastCcEvent: '', inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, upstreamError: null,
-          // 搜索循环状态：serverTools 来自 convertAnthropicToOpenAI；pendingSearches 由翻译器登记
+          // 服务端工具状态：serverTools 来自 convertAnthropicToOpenAI；pendingServerTools 由翻译器登记
           serverTools: openaiReq._serverTools || null,
-          pendingSearches: null, usageCarry: null, searchCount: 0, nextBlockIndex: 0,
+          pendingServerTools: null, pendingSearches: null, usageCarry: null,
+          searchCount: 0, fetchCount: 0, totalServerToolCalls: 0, nextBlockIndex: 0,
           suppressMessageStart: false, thinkingAll: '', roundText: '',
         };
         const emit = async (ev) => {
@@ -5070,14 +5111,12 @@ async function handleMessages(req, res) {
           }
         };
 
-        // ── 服务端工具（web_search）由本 proxy 代执行 ──
-        // 模型发 tool call → 调 CC 的 /alpha/web-search → 结果以 web_search_tool_result 块下发
+        // ── 服务端工具（web_search / web_fetch）由本 proxy 代执行 ──
+        // 模型发 tool call → 调 CC 的 /alpha/web-search 或 /alpha/web-fetch → 结果以下发
         // → 以 tool_calls + tool 消息追加历史、重建 ccBody 重发上游 → 模型续写。每轮一个翻译器实例，
-        // 块索引 / usage 通过 ctx 接续。轮数上限 = 各工具 max_uses 之和 + 1（末轮收尾），再硬性封顶。
-        // 轮数上限 = 各工具 max_uses 之和（硬性封顶 10；模型可能一轮并行调多次，一轮就吃掉多个额度）。
-        // 额度用完后：给模型一轮 max_uses_exceeded 的错误结果，并把该工具移出定义让它物理上不能再调
-        //（CC 的 tool_choice 只有 auto/any/tool，没有 none——真机 400 验证过）；它若还连续再调，
-        // 不再上游，本地补错误块 + 终结事件，保证流一定有 message_stop。
+        // 块索引 / usage 通过 ctx 接续。共享预算：总调用 <= 10 次，总轮数 <= 10 轮，单轮并发 <= 4。
+        // 额度用完后：给模型一轮 max_uses_exceeded 的错误结果，并把该工具移出定义让它物理上不能再调；
+        // 它若还连续再调，不再上游，本地补错误块 + 终结事件，保证流一定有 message_stop。
         const maxSearchRounds = ctx.serverTools
           ? Math.min(10, Object.values(ctx.serverTools).reduce((s, t) => s + t.maxUses, 0))
           : 0;
@@ -5087,12 +5126,17 @@ async function handleMessages(req, res) {
         const finalizeLocally = async (why) => {
           const c = ctx.usageCarry || { input: 0, output: 0, cached: 0, cacheWrite: 0 };
           const usage = { output_tokens: c.output, input_tokens: c.input, cache_read_input_tokens: c.cached, cache_creation_input_tokens: c.cacheWrite };
-          if (ctx.searchCount) usage.server_tool_use = { web_search_requests: ctx.searchCount };
+          if (ctx.searchCount || ctx.fetchCount) {
+            usage.server_tool_use = {};
+            if (ctx.searchCount) usage.server_tool_use.web_search_requests = ctx.searchCount;
+            if (ctx.fetchCount) usage.server_tool_use.web_fetch_requests = ctx.fetchCount;
+          }
           await emit(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage })}\n\n`);
           await emit(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
-          log('warn', 'Web search loop finalized locally', { why, id: messageId });
+          log('warn', 'Server tools loop finalized locally', { why, id: messageId });
         };
         for (let round = 0; ; round++) {
+          ctx.pendingServerTools = null;
           ctx.pendingSearches = null;
           ctx.roundText = '';
           ctx.thinkingAll = '';
@@ -5105,54 +5149,98 @@ async function handleMessages(req, res) {
             }
             await emit(event);
           }
-          if (aborted || !ctx.pendingSearches || !ctx.pendingSearches.length) break;
+          const pending = ctx.pendingServerTools || ctx.pendingSearches;
+          if (aborted || !pending || !pending.length) break;
 
-          if (round > maxSearchRounds) {
-            // 失控保护：轮数封顶。补错误结果块并本地收尾。
-            for (const p of ctx.pendingSearches) {
+          if (round >= 10 || round > maxSearchRounds) {
+            // 失控保护：轮数封顶（<= 10 轮）。补错误结果块并本地收尾。
+            for (const p of pending) {
+              const tool = ctx.serverTools?.[p.name];
+              const isFetch = tool?.kind === 'web_fetch';
+              const blockType = isFetch ? 'web_fetch_tool_result' : 'web_search_tool_result';
+              const errorType = isFetch ? 'web_fetch_tool_result_error' : 'web_search_tool_result_error';
               const idx = ctx.nextBlockIndex++;
               await emit(
-                `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'web_search_tool_result', tool_use_id: p.id, content: { type: 'web_search_tool_result_error', error_code: 'max_uses_exceeded' } } })}\n\n`
+                `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: blockType, tool_use_id: p.id, content: { type: errorType, error_code: 'max_uses_exceeded' } } })}\n\n`
                 + `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`,
               );
             }
-            await finalizeLocally(`round cap ${maxSearchRounds} exceeded`);
+            await finalizeLocally(`round cap exceeded`);
             break;
           }
 
+          // 单轮并发 ≤ 4，总调用上限 ≤ 10
+          const executions = pending.map(async (p, i) => {
+            const tool = ctx.serverTools?.[p.name];
+            const isFetch = tool?.kind === 'web_fetch';
+            if (i >= 4) {
+              return { p, tool, isFetch, ok: false, errorCode: 'max_uses_exceeded', errorMsg: 'per-round concurrency limit exceeded' };
+            }
+            if (ctx.totalServerToolCalls >= 10 || (tool && tool.used >= tool.maxUses)) {
+              return { p, tool, isFetch, ok: false, errorCode: 'max_uses_exceeded', errorMsg: 'max_uses_exceeded' };
+            }
+            ctx.totalServerToolCalls++;
+            if (tool) tool.used++;
+
+            if (isFetch) {
+              ctx.fetchCount = (ctx.fetchCount || 0) + 1;
+              const res = await executeWebFetch(p.input?.url, p.input?.format, apiKey, currentRoute?.address, abortController.signal, {
+                startIndex: p.input?.startIndex,
+                timeout: p.input?.timeout,
+                headers: req.headers,
+                upstreamFetch,
+                apiBase: CFG.apiBase,
+                version: CC_VERSION,
+              });
+              return { p, tool, isFetch, ok: res.ok, result: res, errorCode: res.errorCode || 'unavailable' };
+            } else {
+              ctx.searchCount = (ctx.searchCount || 0) + 1;
+              const res = await executeWebSearch(p.input?.query, apiKey, req.headers, abortController.signal, {
+                allowedDomains: tool?.allowedDomains,
+                blockedDomains: tool?.blockedDomains,
+              });
+              return { p, tool, isFetch, ok: !res.errorCode, result: res, errorCode: res.errorCode };
+            }
+          });
+
+          const results = await Promise.all(executions);
           const assistantToolCalls = [];
           const toolMessages = [];
-          for (const p of ctx.pendingSearches) {
-            const tool = ctx.serverTools[p.name];
-            let result;
-            if (tool.used >= tool.maxUses) {
-              result = { errorCode: 'max_uses_exceeded' };
+
+          for (const item of results) {
+            const idx = ctx.nextBlockIndex++;
+            if (item.isFetch) {
+              const content = item.ok
+                ? item.result.text
+                : { type: 'web_fetch_tool_result_error', error_code: item.errorCode || 'unavailable' };
+              await emit(
+                `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'web_fetch_tool_result', tool_use_id: item.p.id, content } })}\n\n`
+                + `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`,
+              );
+              assistantToolCalls.push({ id: item.p.upstreamToolCallId, type: 'function', function: { name: item.p.name, arguments: JSON.stringify(item.p.input || {}) } });
+              toolMessages.push({
+                role: 'tool', tool_call_id: item.p.upstreamToolCallId, name: item.p.name,
+                content: item.ok ? item.result.text : `Fetch failed: ${item.errorCode || item.result?.error || 'unavailable'}`,
+              });
             } else {
-              tool.used++;
-              ctx.searchCount++;
-              result = await executeWebSearch(p.input?.query, apiKey, req.headers, abortController.signal, {
-                allowedDomains: tool.allowedDomains,
-                blockedDomains: tool.blockedDomains,
+              const content = item.ok
+                ? item.result.blocks
+                : { type: 'web_search_tool_result_error', error_code: item.errorCode || 'unavailable' };
+              await emit(
+                `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'web_search_tool_result', tool_use_id: item.p.id, content } })}\n\n`
+                + `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`,
+              );
+              assistantToolCalls.push({ id: item.p.upstreamToolCallId, type: 'function', function: { name: item.p.name, arguments: JSON.stringify(item.p.input || {}) } });
+              toolMessages.push({
+                role: 'tool', tool_call_id: item.p.upstreamToolCallId, name: item.p.name,
+                content: item.ok ? item.result.textForModel : `Search failed: ${item.errorCode || 'unavailable'}`,
               });
             }
-            const content = result.errorCode
-              ? { type: 'web_search_tool_result_error', error_code: result.errorCode }
-              : result.blocks;
-            const idx = ctx.nextBlockIndex++;
-            await emit(
-              `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'web_search_tool_result', tool_use_id: p.id, content } })}\n\n`
-              + `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`,
-            );
-            assistantToolCalls.push({ id: p.upstreamToolCallId, type: 'function', function: { name: p.name, arguments: JSON.stringify(p.input || {}) } });
-            toolMessages.push({
-              role: 'tool', tool_call_id: p.upstreamToolCallId, name: p.name,
-              content: result.errorCode ? `Search failed: ${result.errorCode}` : result.textForModel,
-            });
           }
           if (aborted) break;
 
           // 模型拿到 max_uses_exceeded 还连续再调 → 不再上游，本地收尾
-          const allExhausted = toolMessages.length > 0 && toolMessages.every(m => m.content.startsWith('Search failed: max_uses_exceeded'));
+          const allExhausted = toolMessages.length > 0 && toolMessages.every(m => m.content.includes('max_uses_exceeded'));
           exhaustedRounds = allExhausted ? exhaustedRounds + 1 : 0;
           if (exhaustedRounds >= 2) { await finalizeLocally('model kept calling after max_uses_exceeded'); break; }
 
@@ -5160,8 +5248,11 @@ async function handleMessages(req, res) {
           const assistantMsg = { role: 'assistant', content: ctx.roundText || null, tool_calls: assistantToolCalls };
           if (ctx.thinkingAll) assistantMsg.reasoning_content = ctx.thinkingAll;
           openaiReq.messages.push(assistantMsg, ...toolMessages);
-          // 额度用完的服务端工具移出定义：模型物理上不能再调，客户端工具不受影响
-          const exhausted = new Set(Object.keys(ctx.serverTools).filter(n => ctx.serverTools[n].used >= ctx.serverTools[n].maxUses));
+
+          // 额度用完或总调用已达 10 次的服务端工具移出定义：模型物理上不能再调，客户端工具不受影响
+          const exhausted = new Set(
+            Object.keys(ctx.serverTools).filter(n => ctx.serverTools[n].used >= ctx.serverTools[n].maxUses || ctx.totalServerToolCalls >= 10)
+          );
           if (exhausted.size && Array.isArray(openaiReq.tools)) {
             openaiReq.tools = openaiReq.tools.filter(t => !exhausted.has(t.function?.name));
             const tc = openaiReq.tool_choice;
@@ -5169,17 +5260,16 @@ async function handleMessages(req, res) {
             if (!openaiReq.tools.length) { delete openaiReq.tools; delete openaiReq.tool_choice; }
           }
           ccBody = buildCcRequest(openaiReq);
-          log('info', 'Web search round', { round: round + 1, searches: assistantToolCalls.length, removedTools: [...exhausted], id: messageId });
+          log('info', 'Server tool round', { round: round + 1, tools: assistantToolCalls.length, removedTools: [...exhausted], id: messageId });
 
           // 续写轮必须复用该 Key 本次选定的代理出口（currentRoute.address），与首轮同一出口。
-          // 首轮 forwardWithKeyRetry 成功时 route 一定存在，直接复用其 address，无需冗余兜底。
           const continuationProxyUrl = currentRoute.address;
 
           roundResponse = await forwardToCC(ccBody, apiKey, req.headers, abortController.signal, undefined, continuationProxyUrl);
           if (!roundResponse.ok) {
             const errorText = await roundResponse.text().catch(() => '');
             const mapped = mapCcError(roundResponse.status, errorText);
-            log('error', 'CC API error (web search round)', { status: roundResponse.status, code: mapped.code, body: summarizeUpstreamError(errorText) });
+            log('error', 'CC API error (server tool round)', { status: roundResponse.status, code: mapped.code, body: summarizeUpstreamError(errorText) });
             ctx.upstreamError = mapped;
             await emit(`event: error\ndata: ${JSON.stringify({ type: 'error', error: mapped.body.error })}\n\n`);
             break;
@@ -6760,7 +6850,7 @@ server.listen(CFG.port, CFG.host, () => {
     session: 'content-derived x-session-id',
     zdr: CFG.zdr ? 'enabled (x-cmd-zdr: 1 on generation/init requests)' : 'off (CMD_ZDR=1 or per-request x-cmd-zdr: 1 to enable)',
     emptySystemPlaceholder: CFG.emptySystemPlaceholder ? 'on (space placeholder for requests without system prompt, issue #17)' : 'off',
-    webSearch: CFG.webSearch ? `on (Anthropic web_search_20250305 served via ${WEB_SEARCH_ROUTE}, timeout ${WEB_SEARCH_TIMEOUT_MS}ms)` : 'off (Anthropic server tools stripped; CC_WEB_SEARCH=1 to enable)',
+    webSearch: CFG.webSearch ? `on (Anthropic web_search & web_fetch served via ${WEB_SEARCH_ROUTE} & ${WEB_FETCH_ROUTE})` : 'off (Anthropic server tools stripped; CC_WEB_SEARCH=1 to enable)',
     logFile: CFG.logFile || '(console only)',
     logLevel: CFG.logLevel,
     clientDrainTimeout: CLIENT_DRAIN_TIMEOUT_MS > 0 ? `${CLIENT_DRAIN_TIMEOUT_MS}ms` : 'disabled',

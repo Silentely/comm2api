@@ -28,7 +28,7 @@
 
 - **三协议原生兼备**：
   - OpenAI `/v1/chat/completions`（流式/非流式、Function Calling 工具调用、多模态识图、深度思考 `reasoning_content`）
-  - Anthropic `/v1/messages`（支持 Claude Code 原生接入，集成 `web_search_20250305` 服务端搜索）
+  - Anthropic `/v1/messages`（支持 Claude Code 原生接入，集成 `web_search_20250305` 服务端搜索与官方 `/alpha/web-fetch` 服务端抓取，内置 SSRF 防护与 LRU 缓存）
   - OpenAI Responses API (`/v1/responses`，内置首字静默保活 `: keepalive`)
 - **零运行时依赖**：服务端纯原生 Node.js 实现（`node:http`、`node:crypto` 等），无 Express/Hono 等框架黑盒，轻量稳定，冷启动毫秒级。
 - **📊 官方额度感知调度 (v2)**：
