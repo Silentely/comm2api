@@ -88,6 +88,7 @@ skills/
 .superpowers/
 .full-review/
 .evolver/
+docs/plans/
 .evolver.lock
 evolver.pid
 coding-trajectories.jsonl
