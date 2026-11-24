@@ -34,8 +34,10 @@ async function warmupQuota(keyId) {
     const res = await api('POST', '/quota/warmup', keyId ? { id: keyId } : {})
     const results = res.data?.results || []
     const failed = results.filter(r => !r.ok && !r.skipped).length
+    const skipped = results.filter(r => r.skipped).length
     if (failed && failed === results.length) toast.error(res.message || '预热失败')
     else if (failed) toast.warning(res.message || `部分账号预热失败（${failed} 个）`)
+    else if (skipped && skipped === results.length) toast.info(res.message || '该账号正在预热中，请稍候')
     else toast.success(res.message || '预热完成')
     await loadQuota(true)
   } catch (e) {
@@ -49,7 +51,13 @@ async function refreshQuota(keyId) {
   quotaBusy.value = keyId || 'all'
   try {
     const res = await api('POST', '/quota/refresh', keyId ? { id: keyId } : {})
-    toast.success(res.message || '额度已刷新')
+    const results = res.data?.results || []
+    const failed = results.filter(r => !r.ok && !r.skipped).length
+    const skipped = results.filter(r => r.skipped).length
+    if (failed && failed === results.length) toast.error(res.message || '额度刷新失败')
+    else if (failed) toast.warning(res.message || `部分账号刷新失败（${failed} 个）`)
+    else if (skipped && skipped === results.length) toast.info(res.message || '正在刷新或退避中')
+    else toast.success(res.message || '额度已刷新')
     await loadQuota(true)
   } catch (e) {
     toast.error('刷新失败：' + e.message)

@@ -248,7 +248,14 @@ async function quotaUpstreamRequest({ key, url, timeoutMs }) {
       },
       signal: controller.signal,
     }, route.address);
-    const text = await res.text().catch(() => '');
+    let text = '';
+    try {
+      text = await res.text();
+    } catch (e) {
+      if (controller.signal.aborted || e?.name === 'AbortError' || e?.name === 'TimeoutError') throw e;
+      text = '';
+    }
+    if (controller.signal.aborted) throw abortErrorOf(controller.signal);
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
     return { ok: res.ok, status: res.status, json, text, retryAfterMs: parseRetryAfterMs(res.headers) };
@@ -1088,10 +1095,16 @@ function normalizeTestMessage(message) {
  * 同时取出 finishReason 与用量 —— 回答被截断时，「为什么短」本身就是要看的信息
  * （finishReason=max_tokens 说明是 token 上限，不是模型不肯说话）。
  */
-async function consumeProbeStream(response, { timeoutMs = 45000, maxChars = 3000 } = {}) {
+async function consumeProbeStream(response, { timeoutMs = 45000, maxChars = 3000, signal = null } = {}) {
+  if (!response?.body) {
+    return {
+      text: '', reasoning: '', streamError: null, sawFinish: false,
+      finishReason: null, usage: null, upstreamModel: null, upstreamProvider: null, bytes: 0,
+    };
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + Math.max(100, Number(timeoutMs) || 45000);
   let buffer = '';
   let text = '';
   let reasoning = '';      // 思考内容单独收：正文为空时它就是唯一的诊断线索
@@ -1105,10 +1118,45 @@ async function consumeProbeStream(response, { timeoutMs = 45000, maxChars = 3000
   let upstreamModel = null;
   let upstreamProvider = null;
   let bytes = 0;
+  let timedOut = false;
+
+  const readWithDeadline = () => {
+    if (signal?.aborted) return Promise.reject(abortErrorOf(signal));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      timedOut = true;
+      return Promise.resolve({ done: true, value: undefined });
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (fn, val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(t);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        fn(val);
+      };
+      const onAbort = () => {
+        try { reader.cancel().catch(() => {}); } catch {}
+        done(reject, abortErrorOf(signal));
+      };
+      const t = setTimeout(() => {
+        timedOut = true;
+        try { reader.cancel().catch(() => {}); } catch {}
+        done(resolve, { done: true, value: undefined });
+      }, remaining);
+      t.unref?.();
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      reader.read().then(
+        (res) => done(resolve, res),
+        (err) => done(reject, err),
+      );
+    });
+  };
 
   try {
     while (Date.now() < deadline) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithDeadline();
       if (done) break;
       bytes += value?.length || 0;
       buffer += decoder.decode(value, { stream: true });
@@ -1143,6 +1191,12 @@ async function consumeProbeStream(response, { timeoutMs = 45000, maxChars = 3000
     }
   } finally {
     try { await reader.cancel(); } catch {}
+  }
+
+  if (timedOut && !sawFinish && !text && !reasoning && !streamError) {
+    const err = new Error(`probe stream timeout (${Math.max(100, Number(timeoutMs) || 45000)}ms)`);
+    err.name = 'TimeoutError';
+    throw err;
   }
 
   return { text, reasoning, streamError, sawFinish, finishReason, usage, upstreamModel, upstreamProvider, bytes };
@@ -1313,7 +1367,10 @@ function pickWarmupModel() {
   return preferred?.id || fallbackModel('claude-sonnet-4-6');
 }
 
-const WARMUP_TIMEOUT_MS = 30 * 1000;
+const WARMUP_TIMEOUT_MS = (() => {
+  const ms = Number.parseInt(process.env.CC_WARMUP_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(ms) && ms >= 500 ? ms : 30 * 1000;
+})();
 
 async function warmupKey(keyId, { reason = 'manual' } = {}) {
   const entry = keyPool.findById(keyId);
@@ -1369,6 +1426,7 @@ async function warmupKey(keyId, { reason = 'manual' } = {}) {
     const { text, streamError, sawFinish, usage } = await consumeProbeStream(response, {
       maxChars: 50,
       timeoutMs: WARMUP_TIMEOUT_MS,
+      signal: controller.signal,
     });
     if (streamError) {
       try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
@@ -1392,7 +1450,7 @@ async function warmupKey(keyId, { reason = 'manual' } = {}) {
       }
     } catch {}
   } catch (e) {
-    if (e?.name === 'AbortError') {
+    if (e?.name === 'AbortError' || e?.name === 'TimeoutError') {
       try { keyPool.recordRequest(entry.key, { ok: false }); } catch {}
       throw new Error(`预热请求超时（${WARMUP_TIMEOUT_MS / 1000}s）`);
     }
@@ -2688,9 +2746,22 @@ function headersToInit(raw) {
   return out;
 }
 
+function abortErrorOf(signal) {
+  const r = signal?.reason;
+  if (r instanceof Error && (r.name === 'AbortError' || r.name === 'TimeoutError')) return r;
+  const err = new Error(typeof r === 'string' && r ? r : 'This operation was aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
 /**
  * 经 HTTP 代理发上游请求，返回与 fetch 兼容的 Response（.ok/.status/.text()/.body()）。
  * proxyUrl 省略时用全局单代理（历史行为）；代理池为每次尝试传入自己那一条。
+ *
+ * 关键不变量：CONNECT / TLS 握手 / 请求头等待 / 响应体读取四个阶段都必须正确响应
+ * AbortSignal 与对端提前关闭（close），绝不能留下永不 settle 的悬空 Promise。
+ * （Node 中 tlsSocket.destroy() 无参不会触发 error，只触发 close；响应头返回后
+ * 也会继续在 body 生命周期内监听 signal，直到流结束或关闭。）
  */
 async function proxyFetch(urlStr, options = {}, proxyUrl = null) {
   const proxy = parseProxyUrl(proxyUrl || UPSTREAM_PROXY);
@@ -2699,84 +2770,225 @@ async function proxyFetch(urlStr, options = {}, proxyUrl = null) {
   const port = Number.parseInt(u.port || (isTls ? '443' : '80'), 10);
   const target = `${u.hostname}:${port}`;
   const { signal, body } = options;
-  const abortListeners = [];
-  const onAbort = (fn) => {
-    if (signal) {
-      signal.addEventListener('abort', fn, { once: true });
-      abortListeners.push(fn);
-    }
-  };
-  const cleanupAborts = () => {
-    if (signal) {
-      for (const fn of abortListeners) signal.removeEventListener('abort', fn);
-    }
-  };
+  if (signal?.aborted) throw abortErrorOf(signal);
 
-  try {
-    // 1. CONNECT 隧道 —— 代理只做裸字节转发，TLS 由本端端到端完成
-    const rawSocket = await new Promise((resolve, reject) => {
-      const connectReq = http.request({
-        host: proxy.host,
-        port: proxy.port,
-        method: 'CONNECT',
-        path: target,
-        headers: { Host: target, ...(proxy.auth ? { 'Proxy-Authorization': proxy.auth } : {}) },
-        timeout: PROXY_CONNECT_TIMEOUT_MS,
-      });
-      connectReq.on('connect', (res, socket) => {
-        if (res.statusCode !== 200) {
-          socket.destroy();
-          reject(new Error(`upstream proxy CONNECT ${target} failed: HTTP ${res.statusCode}`));
+  // 1. CONNECT 隧道 —— 代理只做裸字节转发，TLS 由本端端到端完成
+  const rawSocket = await new Promise((resolve, reject) => {
+    let settled = false;
+    let onAbort = null;
+    const done = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      fn(val);
+    };
+
+    const connectReq = http.request({
+      host: proxy.host,
+      port: proxy.port,
+      method: 'CONNECT',
+      path: target,
+      headers: { Host: target, ...(proxy.auth ? { 'Proxy-Authorization': proxy.auth } : {}) },
+      timeout: PROXY_CONNECT_TIMEOUT_MS,
+    });
+    connectReq.on('connect', (res, socket) => {
+      if (settled || signal?.aborted) {
+        try { socket.destroy(); } catch {}
+        done(reject, abortErrorOf(signal));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        try { socket.destroy(); } catch {}
+        done(reject, new Error(`upstream proxy CONNECT ${target} failed: HTTP ${res.statusCode}`));
+        return;
+      }
+      done(resolve, socket);
+    });
+    connectReq.on('response', (res) => {
+      try { res.resume(); } catch {}
+      try { connectReq.destroy(); } catch {}
+      done(reject, new Error(`upstream proxy CONNECT ${target} failed: HTTP ${res.statusCode}`));
+    });
+    connectReq.on('timeout', () => {
+      const err = new Error('upstream proxy CONNECT timeout');
+      try { connectReq.destroy(err); } catch {}
+      done(reject, err);
+    });
+    connectReq.on('error', (err) => done(reject, err));
+    connectReq.on('close', () => {
+      if (!settled) done(reject, new Error('upstream proxy CONNECT closed unexpectedly'));
+    });
+    if (signal) {
+      onAbort = () => {
+        try { connectReq.destroy(); } catch {}
+        done(reject, abortErrorOf(signal));
+      };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    connectReq.end();
+  });
+
+  // 2. 隧道上做 TLS（证书按目标主机名校验，不做任何降级）
+  let socket = rawSocket;
+  if (isTls) {
+    if (signal?.aborted) {
+      try { rawSocket.destroy(); } catch {}
+      throw abortErrorOf(signal);
+    }
+    socket = tls.connect({ socket: rawSocket, servername: u.hostname });
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let onAbort = null;
+      const done = (fn, val) => {
+        if (settled) return;
+        settled = true;
+        socket.off('secureConnect', onSecureConnect);
+        socket.off('error', onError);
+        socket.off('close', onClose);
+        socket.off('timeout', onTimeout);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+        fn(val);
+      };
+      const onSecureConnect = () => {
+        if (signal?.aborted) {
+          try { socket.destroy(); } catch {}
+          done(reject, abortErrorOf(signal));
           return;
         }
-        resolve(socket);
-      });
-      connectReq.on('timeout', () => connectReq.destroy(new Error('upstream proxy CONNECT timeout')));
-      connectReq.on('error', reject);
-      onAbort(() => { try { connectReq.destroy(); } catch {} });
-      connectReq.end();
+        socket.setTimeout(0);
+        done(resolve);
+      };
+      const onError = (err) => {
+        try { socket.destroy(); } catch {}
+        done(reject, err);
+      };
+      const onClose = () => {
+        done(reject, new Error('upstream proxy TLS handshake closed unexpectedly'));
+      };
+      const onTimeout = () => {
+        const err = new Error('upstream proxy TLS handshake timeout');
+        try { socket.destroy(err); } catch {}
+        done(reject, err);
+      };
+      socket.setTimeout(PROXY_CONNECT_TIMEOUT_MS);
+      socket.once('secureConnect', onSecureConnect);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+      socket.once('timeout', onTimeout);
+      if (signal) {
+        onAbort = () => {
+          try { socket.destroy(); } catch {}
+          done(reject, abortErrorOf(signal));
+        };
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
     });
+  }
 
-    // 2. 隧道上做 TLS（证书按目标主机名校验，不做任何降级）
-    let socket = rawSocket;
-    if (isTls) {
-      socket = tls.connect({ socket: rawSocket, servername: u.hostname });
-      await new Promise((resolve, reject) => {
-        socket.once('secureConnect', resolve);
-        socket.once('error', reject);
-        onAbort(() => { try { socket.destroy(); } catch {} });
-      });
-    }
+  // 3. 复用隧道 socket 发请求（含响应体阶段的 signal 绑定）
+  if (signal?.aborted) {
+    try { socket.destroy(); } catch {}
+    throw abortErrorOf(signal);
+  }
 
-    // 3. 复用隧道 socket 发请求
-    return await new Promise((resolve, reject) => {
-      const mod = isTls ? https : http;
-      const req = mod.request({
-        host: u.hostname,
-        port,
-        path: u.pathname + u.search,
-        method: options.method || 'GET',
-        headers: options.headers || {},
-        createConnection: () => socket,
-      }, (res) => {
-        // 204/205/304 按规范不允许带 body，Response 构造器会直接抛 —— 这两个状态必须传 null，
-        // 同时把连接排空，避免隧道 socket 悬着。
-        const nullBodyStatus = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
-        if (nullBodyStatus) { try { res.resume(); } catch {} }
-        resolve(new Response(nullBodyStatus ? null : Readable.toWeb(res), {
+  // 防止后续销毁隧道 socket 时在极端时序下冒出未捕获的 socket error 事件
+  socket.on('error', () => {});
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let onAbort = null;
+    const done = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      fn(val);
+    };
+
+    const mod = isTls ? https : http;
+    const req = mod.request({
+      host: u.hostname,
+      port,
+      path: u.pathname + u.search,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      createConnection: () => socket,
+    }, (res) => {
+      if (settled || signal?.aborted) {
+        try { res.destroy(); } catch {}
+        try { req.destroy(); } catch {}
+        try { socket.destroy(); } catch {}
+        done(reject, abortErrorOf(signal));
+        return;
+      }
+      // 204/205/304 按规范不允许带 body，Response 构造器会直接抛 —— 这两个状态必须传 null，
+      // 同时把连接排空，避免隧道 socket 悬着。
+      const nullBodyStatus = res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
+      if (nullBodyStatus) {
+        try { res.resume(); } catch {}
+        done(resolve, new Response(null, {
           status: res.statusCode,
           statusText: res.statusMessage,
           headers: headersToInit(res.headers),
         }));
+        return;
+      }
+
+      if (signal) {
+        const onBodyAbort = () => {
+          const err = abortErrorOf(signal);
+          try { res.destroy(err); } catch {}
+          try { req.destroy(); } catch {}
+          try { socket.destroy(); } catch {}
+        };
+        const detachBodyAbort = () => {
+          signal.removeEventListener('abort', onBodyAbort);
+        };
+        signal.addEventListener('abort', onBodyAbort, { once: true });
+        res.once('end', detachBodyAbort);
+        res.once('close', detachBodyAbort);
+        res.once('error', detachBodyAbort);
+      }
+
+      // 调用方取消流（reader.cancel / body.cancel）时同步关闭隧道，避免连接泄漏
+      res.once('close', () => {
+        if (!res.complete) {
+          try { req.destroy(); } catch {}
+          try { socket.destroy(); } catch {}
+        }
       });
-      req.on('error', reject);
-      onAbort(() => { try { req.destroy(); } catch {} });
-      if (body !== undefined && body !== null) req.write(body);
-      req.end();
+
+      done(resolve, new Response(Readable.toWeb(res), {
+        status: res.statusCode,
+        statusText: res.statusMessage,
+        headers: headersToInit(res.headers),
+      }));
     });
-  } finally {
-    cleanupAborts();
-  }
+    req.on('error', (err) => {
+      if (!settled) {
+        try { socket.destroy(); } catch {}
+        done(reject, err);
+      }
+    });
+    req.once('close', () => {
+      if (!settled) {
+        try { socket.destroy(); } catch {}
+        done(reject, new Error('upstream proxy request closed unexpectedly'));
+      }
+    });
+    if (signal) {
+      onAbort = () => {
+        try { req.destroy(); } catch {}
+        try { socket.destroy(); } catch {}
+        done(reject, abortErrorOf(signal));
+      };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    if (body !== undefined && body !== null) req.write(body);
+    req.end();
+  });
 }
 
 // Bun 的 node:http 基于 fetch 实现：CONNECT 方法直接报 "fetch() URL is invalid"，
