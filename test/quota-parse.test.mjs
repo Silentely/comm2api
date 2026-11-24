@@ -407,6 +407,21 @@ test('真实结构：没有套餐信息时用「已用 + 剩余」合成月度�
   assert.ok(Math.abs(s.windows.monthly.percentUsed - 0.37432) < 0.001);
 });
 
+test('月度 credits 缺失时不能用 costUsd 推算额度使用量', () => {
+  const s = buildSnapshot({
+    credits: { credits: { monthlyCredits: 6.25 } },
+    usage: { costUsd: 3.74 },
+    errors: {},
+  });
+
+  assert.equal(s.usage.costUsd, 3.74, '成本仍应保留在用量数据中');
+  assert.equal(s.usage.monthlyCredits, null, '接口没有给出月度 credits 已用量');
+  assert.equal(s.windows.monthly.used, null, '不能把美元成本当作 credits 已用量');
+  assert.equal(s.windows.monthly.cap, null, '缺少 credits 已用量时分母也不能混算');
+  assert.equal(s.windows.monthly.percentUsed, null);
+  assert.equal(s.windows.monthly.partial, true);
+});
+
 test('套餐注册表：长 ID 优先匹配，未知套餐返回 null', () => {
   assert.equal(planTotalCredits('individual-go-v1'), 10);
   assert.equal(planTotalCredits('individual-pro-v1'), 80, '不能被 individual-pro 抢先匹配');
