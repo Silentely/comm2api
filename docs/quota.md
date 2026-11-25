@@ -70,7 +70,14 @@ Command Code 的套餐额度（尤其是 Go $1 的五小时窗口）是官方口
   这类账号没有重置时间可等，只认 `resetAt` 会永远停在「重置时间未知」；
 - 开窗后官方仍不给 `resetAt` 时，按「预热时间 + 5 小时」给出估算重置时间
   （标记 `resetEstimated`，前端显示「按预热时间估算」），同时按 5 小时窗口寿命兜底再开一次；
-- 同一账号 30 分钟内不重复开窗，失败按指数退避（60s 起，上限 30 分钟）；
+- 到点后**不会立刻**开窗：每个账号会在错峰窗口 `quotaWarmupJitterMs`（默认 10 分钟，
+  `0` 表示关闭）内随机等 `quotaWarmupJitterMinMs`（默认 30 秒，`0` 表示不设下限）
+  ～窗口长度再发请求，避免同一 `resetAt` 的一批账号（或升级后集中出现的冷账号）
+  在同一轮一起打上游；把下限调小可以让重置后的首轮更贴近 `resetAt`；
+- 同一轮错峰时刻只抽一次并落盘，`checkRecoveries` 重复检查不会重新抽签；
+  预热成功后清空，下一个 5 小时周期重新抽签；
+- 同一账号预热成功后有 2 分钟防抖（`WARMUP_DEBOUNCE_MS`），失败按指数退避
+  （60s 起，上限 30 分钟），重试前重新抽错峰；
 - 窗口已明确耗尽、代理不可用、鉴权失效或限流中都不预热；
 - 冷窗口的开窗判断**不依赖**额度快照是否「过期」——采集间隔可以长于过期阈值，
   且冷窗口不会因为上次采集失败自己打开；
@@ -195,6 +202,8 @@ Anthropic 用 `{type:'error',error:{type:'rate_limit_error'|'overloaded_error',.
 | `quotaFallbackCooldownMs` | 300000 | 无官方 resetAt 时的重试窗口 |
 | `quotaForecast` | true | 燃烧预测开关 |
 | `quotaAutoWarmup` | true | 5 小时窗口预热：重置后自动开窗；`resetAt` 未知的冷账号也会主动开窗 |
+| `quotaWarmupJitterMs` | 600000 | 预热随机错峰窗口（毫秒，0 表示关闭）；到点后在上限内随机延迟开窗 |
+| `quotaWarmupJitterMinMs` | 30000 | 错峰下限（毫秒，0 表示允许到点即开）；越小越贴近 `resetAt` |
 | `accountMaxConcurrency` | 0 | 单账号并发上限（0 = 不限） |
 | `crossAccountRetry` | true | 允许安全条件下的当前请求跨账号重试 |
 | `sessionAffinity` | true | 会话粘性总开关 |

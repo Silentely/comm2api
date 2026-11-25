@@ -26,6 +26,8 @@ const form = reactive({
   quotaUnknownBlock: false,
   quotaForecast: true,
   quotaAutoWarmup: true,
+  quotaWarmupJitterSec: 600,
+  quotaWarmupJitterMinSec: 30,
   accountMaxConcurrency: 0,
   crossAccountRetry: true,
   sessionAffinity: true,
@@ -85,6 +87,8 @@ function applyConfig(cfg) {
   form.quotaUnknownBlock = !!q.unknownBlock
   form.quotaForecast = q.forecast !== false
   form.quotaAutoWarmup = q.autoWarmup !== false
+  form.quotaWarmupJitterSec = Math.round((q.warmupJitterMs ?? 600000) / 1000)
+  form.quotaWarmupJitterMinSec = Math.round((q.warmupJitterMinMs ?? 30000) / 1000)
   const sch = cfg.scheduling || {}
   form.accountMaxConcurrency = sch.accountMaxConcurrency ?? 0
   form.crossAccountRetry = sch.crossAccountRetry !== false
@@ -138,6 +142,8 @@ async function saveConfig() {
     payload.quotaUnknownBlock = !!form.quotaUnknownBlock
     payload.quotaForecast = !!form.quotaForecast
     payload.quotaAutoWarmup = !!form.quotaAutoWarmup
+    payload.quotaWarmupJitterMs = Math.round(Number(form.quotaWarmupJitterSec) * 1000)
+    payload.quotaWarmupJitterMinMs = Math.round(Number(form.quotaWarmupJitterMinSec) * 1000)
     payload.accountMaxConcurrency = Number(form.accountMaxConcurrency)
     payload.crossAccountRetry = !!form.crossAccountRetry
     payload.sessionAffinity = !!form.sessionAffinity
@@ -398,6 +404,14 @@ onMounted(() => {
             </label>
           </div>
           <div class="field">
+            <label>预热随机错峰（秒，0 = 关闭）</label>
+            <input v-model.number="form.quotaWarmupJitterSec" type="number" min="0" max="3600" step="30" :disabled="!form.quotaAutoWarmup" />
+          </div>
+          <div class="field">
+            <label>预热错峰下限（秒，0 = 不设下限）</label>
+            <input v-model.number="form.quotaWarmupJitterMinSec" type="number" min="0" max="3600" step="5" :disabled="!form.quotaAutoWarmup" />
+          </div>
+          <div class="field">
             <label>跨账号重试</label>
             <label class="inline-flex" style="cursor: pointer">
               <span class="switch">
@@ -413,7 +427,9 @@ onMounted(() => {
           </div>
         </div>
         <div class="hint" style="margin-top: 0">
-          5小时窗口预热：窗口到期重置后自动发送极小请求激活下一轮 5 小时计时；尚未开窗（重置时间未知）的账号也会主动开窗。<br />
+          5小时窗口预热：窗口到期重置后自动发送极小请求激活下一轮 5 小时计时；尚未开窗（重置时间未知）的账号也会主动开窗。
+          到点后会在「随机错峰」窗口内随机等「下限」～「窗口」秒再发请求，避免一批账号同时打上游；
+          下限填 0 表示允许贴近到点时刻开窗，窗口填 0 则关闭错峰、到点即发。<br />
           跨账号重试只在「下游尚未收到任何内容」时生效；已输出 SSE / 工具调用后绝不重放。
         </div>
       </div>

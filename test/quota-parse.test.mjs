@@ -468,7 +468,7 @@ test('五小时窗口：官方 resetAt=0 时用预热时间估算重置倒计时
     warmup: async () => ({ ok: true, model: 'warm-gate' }),
     now: () => clock,
     persistence: false,
-    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true }),
+    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshOne('a', { force: true });
@@ -498,7 +498,7 @@ test('五小时窗口：官方 resetAt 晚于预热时间时保留官方值', as
     warmup: async () => ({ ok: true, model: 'warm-gate' }),
     now: () => clock,
     persistence: false,
-    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true }),
+    config: () => ({ apiBase: 'http://quota.local', quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshOne('a', { force: true });
@@ -530,7 +530,7 @@ test('预热：warmupOne 与 warmupAll 能够正确调用执行器并记录运�
     },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   // 测试单账号成功
@@ -576,7 +576,7 @@ test('自动预热：到达 5 小时窗口 resetAtMs 后自动触发预热开窗
     },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   // 先拉一次额度建立快照（resetAtMs = clock + 5000）
@@ -624,7 +624,7 @@ test('自动预热：resetAt 未知（官方返回 0）的冷账号同样会被�
     },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshAll({ reason: 'startup' });
@@ -674,7 +674,7 @@ test('自动预热：多个冷账号同时到期时分轮开窗，不会一起�
     },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshAll({ reason: 'startup' });
@@ -706,7 +706,7 @@ test('自动预热：快照过期时冷窗口仍然开窗（采集间隔可能�
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true, quotaStaleMs: 60_000 }),
+    config: () => ({ quotaAutoWarmup: true, quotaStaleMs: 60_000, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshOne('a');
@@ -734,7 +734,7 @@ test('自动预热：当前窗口已耗尽且重置时间未到时不开窗（�
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshOne('a');
@@ -757,7 +757,7 @@ test('自动预热：exceeded 是旧窗口残留、resetAt 已过时仍然开窗
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   await svc.refreshOne('a');
@@ -776,7 +776,7 @@ test('自动预热：周/月窗口仍耗尽时不为五小时窗口空打上游'
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
   svc.raw.accounts.a = {
     fetchedAtMs: clock,
@@ -801,7 +801,7 @@ test('自动预热：已有快照但官方没有五小时窗口时不凭空开�
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
   svc.raw.accounts.a = {
     fetchedAtMs: clock,
@@ -822,7 +822,7 @@ test('自动预热：历史 resetAt 且距上次预热未满 5 小时不重复�
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
   // 快照断更在 6 小时前的一次重置上
   const H = 3600_000;
@@ -851,7 +851,7 @@ test('自动预热：异常的未来 resetAt 不会让心跳永久停摆', async
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
   const H = 3600_000;
   svc.raw.accounts.a = {
@@ -874,7 +874,7 @@ test('自动预热：失败后按指数退避，不每轮都打上游', async ()
     warmup: async () => { attempts += 1; throw new Error('boom'); },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   svc.checkRecoveries();
@@ -913,7 +913,7 @@ test('自动预热：尚未采集到快照的账号同样享受 5 小时兜底�
     warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
     now: () => clock,
     persistence: false,
-    config: () => ({ quotaAutoWarmup: true }),
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 0 }),
   });
 
   // 此时 A 账号完全没有快照（snap 为空）
@@ -932,4 +932,155 @@ test('自动预热：尚未采集到快照的账号同样享受 5 小时兜底�
   svc.checkRecoveries();
   await new Promise(r => setTimeout(r, 10));
   assert.equal(warmups.length, 2, '5小时后无视快照缺失，强制定时开窗');
+});
+
+test('自动预热：到点后按随机错峰延迟开窗，不会在到点当轮立即打上游', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({ ok: false, status: 500, error: 'unused' }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    random: () => 0.5,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 600_000 }),
+  });
+
+  // 完全没有快照的冷账号：以前这一轮就直接开窗，现在必须先等随机错峰。
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 0, '错峰窗口内不能立即开窗');
+  const planned = svc.raw.runtime.a.warmupJitterUntilMs;
+  // 30s 下限 + 0.5 * (600s - 30s) = 315s
+  assert.equal(planned, clock + 315_000);
+
+  // 重复检查不能重新抽签，否则实际开窗时间会无限后移
+  clock += 60_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, planned, '同一轮错峰时刻必须稳定');
+  assert.equal(warmups.length, 0);
+
+  clock = planned - 1;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 0, '差 1 毫秒也不开窗');
+
+  clock = planned;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1, '错峰到点后开窗');
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, null, '开窗成功后清空本轮错峰');
+});
+
+test('自动预热：窗口重置后不会在 resetAt 当刻开窗', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({
+      ok: true, status: 200,
+      json: { data: { windowLimits: { fiveHour: { used: 10, cap: 100, resetAt: (clock + 5000) / 1000 } } } },
+    }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    random: () => 0,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 600_000 }),
+  });
+
+  await svc.refreshOne('a');
+  clock += 6000; // 刚过 resetAt
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 0, 'resetAt 到点后仍需错峰');
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, clock + 30_000, 'random=0 时取错峰下限 30 秒');
+
+  clock += 30_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 1);
+  assert.equal(warmups[0].reason, 'auto_reset');
+});
+
+test('自动预热：多个同批到期账号按随机偏移错开，不会同一轮一起打上游', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const seq = [0, 0.9];
+  let i = 0;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A, KEY_B]),
+    request: async () => ({ ok: false, status: 500, error: 'unused' }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    random: () => seq[i++ % seq.length],
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 600_000 }),
+  });
+
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(warmups.length, 0);
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, clock + 30_000);
+  assert.equal(svc.raw.runtime.b.warmupJitterUntilMs, clock + 543_000);
+
+  clock += 31_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(warmups.map(w => w.keyId), ['a'], '错峰早的账号先开窗');
+
+  clock += 512_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(warmups.map(w => w.keyId), ['a', 'b'], '另一个账号在自己的错峰时刻开窗');
+});
+
+test('自动预热：错峰下限可调小到 0，允许贴近到点时刻开窗', async () => {
+  const warmups = [];
+  let clock = 1_800_000_000_000;
+  const seq = [0.2, 0];
+  let i = 0;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A, KEY_B]),
+    request: async () => ({ ok: false, status: 500, error: 'unused' }),
+    warmup: async (keyId, opts) => { warmups.push({ keyId, ...opts }); return { ok: true }; },
+    now: () => clock,
+    random: () => seq[i++ % seq.length],
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 600_000, quotaWarmupJitterMinMs: 0 }),
+  });
+
+  // 下限为 0：随机值直接决定偏移，0.2 * 600s = 120s
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, clock + 120_000, '抽到非零偏移时仍要等');
+  assert.deepEqual(warmups.map(w => w.keyId), ['b'], '下限为 0 时抽到 0 偏移可以到点即开');
+
+  clock += 119_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(warmups.map(w => w.keyId), ['b'], 'A 的错峰未到');
+
+  clock = 1_800_000_000_000 + 120_000;
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(warmups.map(w => w.keyId), ['b', 'a']);
+});
+
+test('自动预热：错峰下限大于窗口时按窗口长度收敛，不会越过上限', async () => {
+  let clock = 1_800_000_000_000;
+  const svc = createQuotaService({
+    keyPool: fakePool([KEY_A]),
+    request: async () => ({ ok: false, status: 500, error: 'unused' }),
+    warmup: async () => ({ ok: true }),
+    now: () => clock,
+    random: () => 0.99,
+    persistence: false,
+    config: () => ({ quotaAutoWarmup: true, quotaWarmupJitterMs: 60_000, quotaWarmupJitterMinMs: 600_000 }),
+  });
+
+  svc.checkRecoveries();
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(svc.raw.runtime.a.warmupJitterUntilMs, clock + 60_000, '下限被窗口长度夹住');
 });
