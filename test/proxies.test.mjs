@@ -401,6 +401,31 @@ test('绑定模式：auto / bind / rotate 都记在数据目录，且后台能�
     assert.equal(bindings[0].mode, 'rotate');
     assert.equal(bindings[0].proxyIndex, -1, 'rotate 不静态绑定任何一条');
 
+    // direct：第一个 Key 设为直连模式
+    const dirRes = await s.api.post('/proxies/binding', { keyId: keys[0].id, mode: 'direct' });
+    assert.equal(dirRes.status, 200);
+    const dirJson = await dirRes.json();
+    assert.match(dirJson.message, /直连/);
+    assert.equal(dirJson.data.directProxyId, proxyFingerprint('direct'));
+    bindings = (await (await s.api.get('/proxies')).json()).data.bindings;
+    assert.equal(bindings[0].mode, 'direct');
+    assert.equal(bindings[0].proxyAddress, 'direct');
+    assert.equal(bindings[0].boundProxyAddress, 'direct');
+    assert.equal(bindings[0].proxyHealthy, true);
+
+    // bind 直连：第二个 Key 设为 bind direct
+    const bindDirRes = await s.api.post('/proxies/binding', { keyId: keys[1].id, mode: 'bind', proxyId: 'direct' });
+    assert.equal(bindDirRes.status, 200);
+    bindings = (await (await s.api.get('/proxies')).json()).data.bindings;
+    assert.equal(bindings[1].mode, 'bind');
+    assert.equal(bindings[1].proxyAddress, 'direct');
+    assert.equal(bindings[1].boundProxyAddress, 'direct');
+
+    // strict_bind 直连必须被拒绝
+    const strictDirRes = await s.api.post('/proxies/binding', { keyId: keys[0].id, mode: 'strict_bind', proxyId: 'direct' });
+    assert.equal(strictDirRes.status, 400);
+    assert.match((await strictDirRes.json()).error, /严格固定模式必须绑定具体的出站代理，不允许绑定直连/);
+
     // 绑定落在 data/proxies.json，config.json 不动
     const state = JSON.parse(readFileSync(join(s.workdir, 'data', 'proxies.json'), 'utf-8'));
     assert.equal(Object.keys(state.bindings).length, 2);

@@ -458,3 +458,52 @@ test('M5: bind 模式在空池与纯 #pool 时必须可用，不套用 strict_bi
   const rStrictPool = poolOnly.setBinding(fpPool, 'strict_bind');
   assert.equal(rStrictPool.ok, false, '纯 #pool strict_bind 仍必须被拒绝');
 });
+
+// ── M6: Key ↔ 代理绑定增加直连选择（direct 模式与 bind 模式显式直连） ──
+
+test('M6: Key ↔ 代理绑定增加直连选择（direct 模式与 bind 模式显式直连）', () => {
+  const pool = createCleanPool({ keys: ['user_dir_1', 'user_dir_2', 'user_dir_bind'] });
+  const pStatic = pool.add(`http://127.0.0.1:${portSeq++}`);
+  const directId = proxyFingerprint('direct');
+
+  // Case A: 显式设置 mode = 'direct'
+  const fp1 = pool.fingerprintForKey('user_dir_1');
+  const r1 = pool.setBinding(fp1, 'direct');
+  assert.equal(r1.ok, true, '设置 direct 模式必须成功');
+  assert.equal(r1.mode, 'direct');
+  const route1 = pool.routeFor('user_dir_1');
+  assert.equal(route1.available, true);
+  assert.equal(route1.address, 'direct');
+  assert.equal(route1.mode, 'direct');
+  const status1 = pool.proxyStatusFor('user_dir_1');
+  assert.equal(status1.available, true);
+  assert.equal(status1.address, 'direct');
+
+  // Case B: bind 模式下指定 directId
+  const fpBind = pool.fingerprintForKey('user_dir_bind');
+  const rBind = pool.setBinding(fpBind, 'bind', directId);
+  assert.equal(rBind.ok, true, 'bind 模式下显式绑定 direct 必须成功');
+  assert.equal(rBind.mode, 'bind');
+  assert.equal(pool.routeFor('user_dir_bind').address, 'direct');
+
+  // Case C: bind 模式下指定 'direct' 字符串
+  const fp2 = pool.fingerprintForKey('user_dir_2');
+  const r2 = pool.setBinding(fp2, 'bind', 'direct');
+  assert.equal(r2.ok, true, 'bind 模式下传 string direct 必须成功');
+  assert.equal(pool.routeFor('user_dir_2').address, 'direct');
+
+  // Case D: strict_bind 模式下指定 direct 必须拒绝
+  const rStrict = pool.setBinding(fp1, 'strict_bind', 'direct');
+  assert.equal(rStrict.ok, false);
+  assert.match(rStrict.error, /严格固定模式必须绑定具体的出站代理，不允许绑定直连/);
+
+  // Case E: keyViews 视图展示
+  const views = pool.keyViews();
+  const v1 = views.find(v => v.keyId === 'user_dir_1');
+  assert.equal(v1.mode, 'direct');
+  assert.equal(v1.proxyAddress, 'direct');
+  assert.equal(v1.proxyHealthy, true);
+  const vBind = views.find(v => v.keyId === 'user_dir_bind');
+  assert.equal(vBind.mode, 'bind');
+  assert.equal(vBind.proxyAddress, 'direct');
+});

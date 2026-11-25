@@ -27,6 +27,7 @@ const state = reactive({
   proxyFile: '',
   proxyFileError: '',
   dataFile: '',
+  directProxyId: 'direct',
   loading: false,
   loaded: false,
 })
@@ -70,6 +71,7 @@ async function load() {
     state.proxyFile = (data && data.proxyFile) || ''
     state.proxyFileError = (data && data.proxyFileError) || ''
     state.dataFile = (data && data.dataFile) || ''
+    state.directProxyId = (data && data.directProxyId) || 'direct'
     state.loaded = true
   } catch (e) {
     toast.error('加载代理池失败：' + e.message)
@@ -82,6 +84,7 @@ function applyPayload(data) {
   if (!data) return
   if (data.proxies) state.list = data.proxies
   if (data.bindings) state.bindings = data.bindings
+  if (data.directProxyId) state.directProxyId = data.directProxyId
   if (data.proxyFile !== undefined) state.proxyFile = data.proxyFile || ''
   if (data.proxyFileError !== undefined) state.proxyFileError = data.proxyFileError || ''
 }
@@ -299,7 +302,8 @@ function onModeChange(b, mode) {
   const keyId = keyIdOf(b)
   // 「固定」与「严格固定」：优先保留已绑定的代理；若未指定则留空由服务端智能分配独占/空闲代理（防同 IP 多 Key）
   if (mode === 'bind' || mode === 'strict_bind') {
-    const pid = b.proxyId || ''
+    const isDirect = b.proxyId === 'direct' || b.proxyId === state.directProxyId
+    const pid = (mode === 'strict_bind' && isDirect) ? '' : (b.proxyId || '')
     setBinding(keyId, mode, pid)
     return
   }
@@ -540,6 +544,7 @@ onMounted(async () => {
       <div class="section-body">
         <div class="hint">
           <strong>自动</strong>：按 <code>i % N</code> 静态分配，代理故障时转移到最空闲的健康代理，恢复后自动迁回。<br />
+          <strong>直连</strong>：不经过任何代理，直接使用本机网络出站。<br />
           <strong>固定</strong>：优先始终走指定的那一条；那条连不上时临时转移到健康代理（请求不会因此失败），
           它恢复健康后自动迁回 —— 要保证「这个号优先从这个 IP 出去」时用它。<br />
           <strong>严格固定</strong>：只能用这条代理，它不可用时该账号停止派发（不转移、不直连）—— <strong>防同 IP 多 Key 封号</strong>，确保代理严格隔离。<br />
@@ -577,6 +582,7 @@ onMounted(async () => {
                   @change="onModeChange(b, $event.target.value)"
                 >
                   <option value="auto">自动（静态分配 + 故障转移）</option>
+                  <option value="direct">直连（不经过代理）</option>
                   <option value="bind">固定（故障时允许临时转移）</option>
                   <option value="strict_bind">严格固定（故障时停止该账号，不转移）</option>
                   <option value="rotate">每次轮换</option>
@@ -591,7 +597,10 @@ onMounted(async () => {
                   @change="setBinding(keyIdOf(b), b.mode, $event.target.value)"
                 >
                   <option v-if="!b.proxyId" value="" disabled>请选择代理</option>
-                  <option v-for="t in state.list.filter((x) => x.enabled)" :key="t.id" :value="t.id">{{ t.address }}</option>
+                  <option v-if="b.mode === 'bind' && !state.list.some((x) => x.address === 'direct' && x.enabled)" :value="state.directProxyId || 'direct'">direct（直连）</option>
+                  <option v-for="t in state.list.filter((x) => x.enabled)" :key="t.id" :value="t.id">
+                    {{ t.address === 'direct' ? 'direct（直连）' : t.address }}
+                  </option>
                 </select>
                 <span v-else class="hint">—</span>
               </td>
