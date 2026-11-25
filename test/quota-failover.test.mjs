@@ -186,15 +186,15 @@ test('A 五小时额度已满、B 正常：后续新请求全部走 B（不会�
   }
 });
 
-test('多 Key 调度：五小时剩余优先于周/月，并把流量分摊到同档账号', async () => {
+test('多 Key 调度：周余量优先于五小时，并把流量分摊到同档账号', async () => {
   const KEY_C = 'user_ccc3333333333333333333333333';
   const ctl = {
     windows: {
-      // A：五小时快满了，但周很空 —— 不能因为周余量多就优先它
-      [KEY_A]: { used: 80, cap: 100, weekly: { used: 10, cap: 100 } },
-      // B / C：五小时充足，周较紧张；两个账号同档，应该在它们之间分摊
-      [KEY_B]: { used: 20, cap: 100, weekly: { used: 80, cap: 100 } },
-      [KEY_C]: { used: 20, cap: 100, weekly: { used: 80, cap: 100 } },
+      // A：五小时很空，但周额度较紧 —— 周余量顺序高于五小时
+      [KEY_A]: { used: 20, cap: 100, weekly: { used: 80, cap: 100 } },
+      // B / C：五小时较紧但周额度充足；两个账号同档，应该在它们之间分摊
+      [KEY_B]: { used: 80, cap: 100, weekly: { used: 10, cap: 100 } },
+      [KEY_C]: { used: 80, cap: 100, weekly: { used: 10, cap: 100 } },
     },
     generate: {},
   };
@@ -215,10 +215,45 @@ test('多 Key 调度：五小时剩余优先于周/月，并把流量分摊到�
 
     const gens = mock.generates();
     assert.equal(gens.length, 4);
-    assert.equal(gens.filter(g => g.key === KEY_A).length, 0, '五小时剩余更少的账号不应被优先选中');
+    assert.equal(gens.filter(g => g.key === KEY_A).length, 0, '周剩余更少的账号不应被优先选中');
     const usedB = gens.filter(g => g.key === KEY_B).length;
     const usedC = gens.filter(g => g.key === KEY_C).length;
     assert.ok(usedB > 0 && usedC > 0, `同档账号应分摊流量（B=${usedB} C=${usedC}）`);
+  } finally {
+    await proxy.kill();
+    await mock.close();
+  }
+});
+
+test('多 Key 调度：月度重置更近的账号优先于周与五小时余量', async () => {
+  const ctl = {
+    windows: {
+      [KEY_A]: {
+        used: 10, cap: 100,
+        weekly: { used: 10, cap: 100 },
+        monthly: { used: 10, cap: 1000, resetAt: Date.now() + 25 * 24 * 60 * 60 * 1000 },
+      },
+      [KEY_B]: {
+        used: 70, cap: 100,
+        weekly: { used: 70, cap: 100 },
+        monthly: { used: 70, cap: 1000, resetAt: Date.now() + 24 * 60 * 60 * 1000 },
+      },
+    },
+    generate: {},
+  };
+  const mock = await startQuotaUpstream(ctl);
+  const workdir = workdirWith({
+    apiKey: [KEY_A, KEY_B],
+    strategy: 'quota_aware',
+    quotaRefreshIntervalMs: 60_000,
+  });
+  const proxy = await startProxy({ upstreamPort: mock.port, cwd: workdir });
+  try {
+    await sleep(2600);
+    const r = await proxy.post('/v1/chat/completions', CHAT_BODY(), AUTH);
+    assert.equal(r.status, 200);
+    await r.text();
+    assert.equal(mock.generates()[0]?.key, KEY_B, '月度窗口约 24 小时后重置的账号应先于 25 天后重置的账号');
   } finally {
     await proxy.kill();
     await mock.close();

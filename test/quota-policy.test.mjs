@@ -138,42 +138,67 @@ test('排序：可用 < 接近上限 < 未知，且同档内用量低的优先',
   assert.ok(warn < unknown, '未知额度排最后');
 });
 
-test('排序：五小时剩余额度优先于周/月（短窗口不能被周月余量挤下去）', () => {
-  // A 五小时快满了、周很空；B 五小时很空、周快满了。按需求必须先看五小时 → B。
-  const a = snap({ fiveHour: { used: 80, cap: 100 }, weekly: { used: 10, cap: 100 } });
-  const b = snap({ fiveHour: { used: 20, cap: 100 }, weekly: { used: 80, cap: 100 } });
-  const sa = rankAccount({ state: 'available', snapshot: a });
-  const sb = rankAccount({ state: 'available', snapshot: b });
-  assert.ok(sb < sa, '五小时剩余多的账号优先，哪怕周窗口更紧张');
+test('排序：月度窗口越快重置越优先，压过周与五小时额度差异', () => {
+  const sooner = snap({
+    monthly: { used: 90, cap: 100, resetAtMs: NOW + 24 * 60 * 60 * 1000 },
+    weekly: { used: 95, cap: 100 }, fiveHour: { used: 95, cap: 100 },
+  });
+  const later = snap({
+    monthly: { used: 10, cap: 100, resetAtMs: NOW + 25 * 24 * 60 * 60 * 1000 },
+    weekly: { used: 10, cap: 100 }, fiveHour: { used: 10, cap: 100 },
+  });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: sooner, now: NOW }) < rankAccount({ state: 'available', snapshot: later, now: NOW }),
+    '月度重置更近的账号先使用，即使周和五小时余量更少',
+  );
 });
 
-test('排序：五小时相同时按周剩余，再按月剩余', () => {
-  const freshWeek = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 10, cap: 100 }, monthly: { used: 50, cap: 100 } });
-  const tightWeek = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 90, cap: 100 }, monthly: { used: 10, cap: 100 } });
+test('排序：月度窗口同档时按周余量，再按五小时余量', () => {
+  const sameMonthly = { used: 50, cap: 100, resetAtMs: NOW + 10 * 24 * 60 * 60 * 1000 };
+  const freshWeek = snap({ monthly: sameMonthly, weekly: { used: 10, cap: 100 }, fiveHour: { used: 90, cap: 100 } });
+  const tightWeek = snap({ monthly: sameMonthly, weekly: { used: 90, cap: 100 }, fiveHour: { used: 10, cap: 100 } });
   assert.ok(
-    rankAccount({ state: 'available', snapshot: freshWeek }) < rankAccount({ state: 'available', snapshot: tightWeek }),
-    '五小时相同 → 周剩余多的优先',
+    rankAccount({ state: 'available', snapshot: freshWeek, now: NOW }) < rankAccount({ state: 'available', snapshot: tightWeek, now: NOW }),
+    '月度相同时，周余量多的优先，即使五小时余量更少',
   );
 
-  const freshMonth = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 50, cap: 100 }, monthly: { used: 10, cap: 100 } });
-  const tightMonth = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 50, cap: 100 }, monthly: { used: 90, cap: 100 } });
+  const sameWeek = { used: 50, cap: 100 };
+  const freshFive = snap({ monthly: sameMonthly, weekly: sameWeek, fiveHour: { used: 10, cap: 100 } });
+  const tightFive = snap({ monthly: sameMonthly, weekly: sameWeek, fiveHour: { used: 90, cap: 100 } });
   assert.ok(
-    rankAccount({ state: 'available', snapshot: freshMonth }) < rankAccount({ state: 'available', snapshot: tightMonth }),
-    '五小时、周都相同 → 月剩余多的优先',
+    rankAccount({ state: 'available', snapshot: freshFive, now: NOW }) < rankAccount({ state: 'available', snapshot: tightFive, now: NOW }),
+    '月度和周都相同时，五小时余量多的优先',
+  );
+});
+
+test('排序：在途请求和燃烧预测不会跨过额度窗口档位', () => {
+  const nearerReset = snap({
+    monthly: { used: 50, cap: 100, resetAtMs: NOW + 24 * 60 * 60 * 1000 },
+    weekly: { used: 50, cap: 100 }, fiveHour: { used: 50, cap: 100 },
+  });
+  const fartherReset = snap({
+    monthly: { used: 50, cap: 100, resetAtMs: NOW + 3 * 24 * 60 * 60 * 1000 },
+    weekly: { used: 50, cap: 100 }, fiveHour: { used: 50, cap: 100 },
+  });
+  assert.ok(
+    rankAccount({ state: 'available', snapshot: nearerReset, now: NOW, inflight: 4,
+      forecast: { status: 'ok', willExhaustBeforeReset: true } })
+      < rankAccount({ state: 'available', snapshot: fartherReset, now: NOW }),
+    '额度窗口排序优先于在途请求与燃烧预测',
   );
 });
 
 test('排序：窗口缺失按中性处理，不会因为缺数据被排到最前或最后', () => {
-  const healthy = snap({ fiveHour: { used: 10, cap: 100 }, weekly: { used: 10, cap: 100 }, monthly: { used: 10, cap: 100 } });
-  const onlyFive = snap({ fiveHour: { used: 10, cap: 100 } });
-  const missingFive = snap({ weekly: { used: 10, cap: 100 } });
-  const tight = snap({ fiveHour: { used: 90, cap: 100 }, weekly: { used: 90, cap: 100 }, monthly: { used: 90, cap: 100 } });
+  const monthly = { used: 50, cap: 100, resetAtMs: NOW + 10 * 24 * 60 * 60 * 1000 };
+  const weekly = { used: 50, cap: 100 };
+  const healthy = snap({ monthly, weekly, fiveHour: { used: 10, cap: 100 } });
+  const missingFive = snap({ monthly, weekly });
+  const tight = snap({ monthly, weekly, fiveHour: { used: 90, cap: 100 } });
 
-  const s = o => rankAccount({ state: 'available', snapshot: o });
-  // 有真实五小时余量的账号 > 五小时未知（中性 0.5）> 五小时明确紧张
-  assert.ok(s(healthy) < s(onlyFive), '五小时真实余量足 → 排最前');
-  assert.ok(s(onlyFive) < s(missingFive), '五小时未知不等于余量足，排在已知充足之后');
-  assert.ok(s(missingFive) < s(tight), '五小时未知也不等于已用完，排在明确紧张之前');
+  const s = o => rankAccount({ state: 'available', snapshot: o, now: NOW });
+  // 五小时低优先级同档：已知宽松 > 未知（中性 0.5）> 明确紧张
+  assert.ok(s(healthy) < s(missingFive), '五小时真实余量足于同档优先');
+  assert.ok(s(missingFive) < s(tight), '五小时未知不等于已用完，排在明确紧张之前');
 });
 
 test('排序：同档内优先空闲账号，避免并发把单个 Key 打爆', () => {
@@ -217,13 +242,14 @@ test('剩余比例：官方只给 percentUsed 时也要参与排序', () => {
   assert.equal(quotaRemainingScore(snap({})), 0.5, '全部缺失时就是中性值');
 });
 
-test('排序：五小时多一档永远压过周 + 月的全部余量（不再被加权平均翻盘）', () => {
-  // 旧版加权平均会在这里倒挂：B 的周五满，把五小时 5 个百分点的差距翻了过来。
-  const a = snap({ fiveHour: { used: 45, cap: 100 }, weekly: { used: 100, cap: 100 }, monthly: { used: 100, cap: 100 } });
-  const b = snap({ fiveHour: { used: 50, cap: 100 }, weekly: { used: 0, cap: 100 }, monthly: { used: 0, cap: 100 } });
+test('排序：五小时剩余只在月度和周窗口同档时决定顺序', () => {
+  const monthly = { used: 50, cap: 100, resetAtMs: NOW + 10 * 24 * 60 * 60 * 1000 };
+  const weekly = { used: 50, cap: 100 };
+  const moreFive = snap({ monthly, weekly, fiveHour: { used: 10, cap: 100 } });
+  const lessFive = snap({ monthly, weekly, fiveHour: { used: 90, cap: 100 } });
   assert.ok(
-    rankAccount({ state: 'available', snapshot: a }) < rankAccount({ state: 'available', snapshot: b }),
-    '五小时剩余更多的账号必须先被选中',
+    rankAccount({ state: 'available', snapshot: moreFive, now: NOW }) < rankAccount({ state: 'available', snapshot: lessFive, now: NOW }),
+    '月度与周都同档时，五小时余量更多的账号优先',
   );
 });
 
