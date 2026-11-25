@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { allocPort, closeServer, seedConfig, startMockUpstream, startProxy, setup } from './helpers.mjs';
@@ -649,3 +650,103 @@ test('全链路集成 4b：出站代理一致性 - web_fetch 抓取辅助请求�
     await fallbackProxy.close();
   }
 });
+test('全链路集成 4c：出站代理一致性 - rotate 轮换场景下辅助请求严格复用首轮 route 代理', async () => {
+  const proxyA = await startRecordingProxy();
+  const proxyB = await startRecordingProxy();
+
+  let genRound = 0;
+  const upstream = await startMockUpstream({
+    onRequest: (req, res) => {
+      if (req.url === '/alpha/generate') {
+        genRound++;
+        if (genRound === 1) {
+          // 第一轮：模型发起 web_search 工具调用
+          sse(res, nd(
+            { type: 'start' }, { type: 'start-step' },
+            { type: 'tool-call', toolCallId: 'call_ws1', toolName: 'web_search', input: { query: 'test proxy consistency' } },
+            { type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 50, outputTokens: 5 } },
+            { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 50, outputTokens: 5 } },
+          ));
+        } else {
+          // 第二轮：搜索后收尾回答
+          sse(res, nd(
+            { type: 'start' }, { type: 'start-step' },
+            { type: 'text-start' }, { type: 'text-delta', text: 'Search finished successfully.' }, { type: 'text-end' },
+            { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 80, outputTokens: 6 } },
+            { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 80, outputTokens: 6 } },
+          ));
+        }
+        return true;
+      }
+      if (req.url === '/alpha/web-search') {
+        json(res, {
+          results: [{ url: 'https://example.com/result', title: 'Example' }],
+        });
+        return true;
+      }
+      return false;
+    },
+  });
+
+  const workdir = mkdtempSync(join(tmpdir(), 'ccp-peer-route-rotate-'));
+  seedConfig(workdir, {
+    apiBase: `http://127.0.0.1:${upstream.port}`,
+    proxies: [proxyA.url, proxyB.url],
+    webSearch: true,
+  });
+
+  // 在 data/proxies.json 中给当前上游 Key 配置 rotate 模式
+  const dataDir = join(workdir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const keyFp = createHash('sha256').update('user_test').digest('hex').slice(0, 16);
+  writeFileSync(join(dataDir, 'proxies.json'), JSON.stringify({
+    entries: [
+      { id: 'p_a', value: proxyA.url, enabled: true },
+      { id: 'p_b', value: proxyB.url, enabled: true },
+    ],
+    bindings: {
+      [keyFp]: { mode: 'rotate' },
+    },
+  }, null, 2));
+
+  const proxy = await startProxy({
+    cwd: workdir,
+    upstreamPort: upstream.port,
+    env: {
+      CC_WEB_SEARCH: '1',
+      CC_DATA_DIR: dataDir,
+      CC_API_KEY: 'test_key_1',
+    },
+  });
+
+  try {
+    const r = await proxy.post('/v1/messages', {
+      model: 'claude-3-7-sonnet',
+      stream: true,
+      messages: [{ role: 'user', content: 'search for test' }],
+      tools: [WEB_SEARCH_TOOL],
+      max_tokens: 100,
+    }, { 'x-api-key': 'user_test' });
+
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.ok(text.includes('Search finished successfully.'));
+
+    // 关键断言：
+    // 在 rotate 模式下，主请求选定的首轮代理（假设是 proxyA 或 proxyB）必须被辅助请求（web_search）与续写轮严格复用！
+    // 两个代理中，必须有一个代理承载了全部流量（hits >= 2），而另一个代理请求数恒为 0！
+    // 如果辅助请求重新挑了 route，则主请求打到 A，web_search 打到 B，另一个代理的 hits 就会 > 0，从而使测试断言失败！
+    const hitsA = proxyA.hits.length;
+    const hitsB = proxyB.hits.length;
+    assert.ok(
+      (hitsA >= 2 && hitsB === 0) || (hitsB >= 2 && hitsA === 0),
+      `rotate 模式下辅助请求必须完全复用首轮 route 代理，不得换到另一条代理！当前 hitsA=${hitsA}, hitsB=${hitsB}`
+    );
+  } finally {
+    await proxy.kill();
+    await upstream.close();
+    await proxyA.close();
+    await proxyB.close();
+  }
+});
+

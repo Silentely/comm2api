@@ -3297,8 +3297,11 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
     tried.add(key);
 
     // 每条 Key 的代理绑定：auto 静态绑定（故障时转移）/ bind 固定（故障时临时转移）/
-    // strict_bind 严格固定（故障时失败关闭）/ rotate 每次轮换
-    const route = proxyPool.routeFor(key, triedProxies);
+    // strict_bind 严格固定（故障时失败关闭）/ rotate 每次轮换。
+    // 首轮请求优先复用初始锁定的 initialRoute，确保 rotate 模式下主请求与辅助请求出口完全一致
+    const route = (attempt === 1 && triedProxies.size === 0 && ctx.initialRoute && key === firstKey)
+      ? ctx.initialRoute
+      : proxyPool.routeFor(key, triedProxies);
     if (!route.available) {
       log('warn', '严格绑定的出站代理不可用，跳过该账号', {
         keyId: accountIdOf(key), reason: route.reason, attempt,
@@ -3583,14 +3586,34 @@ async function executeWebSearch(query, apiKey, incomingHeaders = {}, signal, opt
 
   let data;
   try {
-    // 经 upstreamFetch：配置了 CC_UPSTREAM_PROXY 时与 generate 一样走代理（issue #18）
+    // 辅助请求一律复用主请求首轮绑定的 route.address，不许重新解析。
+    // 如果确实拿不到首轮 route，报错拒绝，不许回退到全局代理或直连
+    let boundProxyAddress = undefined;
+    if (opts.proxyAddress !== undefined) {
+      boundProxyAddress = opts.proxyAddress;
+    } else if (opts.route) {
+      if (opts.route.available === false) {
+        log('warn', 'Web search bound route is unavailable', { reason: opts.route.reason });
+        return { errorCode: 'unavailable' };
+      }
+      boundProxyAddress = opts.route.address;
+    } else if (opts.allowDirect) {
+      boundProxyAddress = null;
+    }
+
+    if (boundProxyAddress === undefined) {
+      log('warn', 'Web search missing bound route, rejecting helper request without fallback');
+      return { errorCode: 'unavailable' };
+    }
+
+    // 经 upstreamFetch：辅助请求复用首轮 route 绑定的 boundProxyAddress
     const r = await upstreamFetch(`${CFG.apiBase}${WEB_SEARCH_ROUTE}`, {
       method: 'POST',
       headers,
       signal: combined,
       // 多要几条抵消被剥掉的广告
       body: JSON.stringify({ query: query.trim(), numResults: Math.min(10, want + 3) }),
-    }, proxyAddressFor(apiKey));
+    }, boundProxyAddress);
     if (!r.ok) {
       log('warn', 'Web search upstream error', { status: r.status });
       return { errorCode: r.status === 429 ? 'too_many_requests' : 'unavailable' };
@@ -3732,7 +3755,17 @@ async function readStreamText(stream, signal) {
   return text;
 }
 
-async function transcribeImage({ imageUrl, apiKey, proxyAddress, signal, index }) {
+async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, index, allowDirect = false }) {
+  let boundAddress = proxyAddress;
+  if (boundAddress === undefined && route) {
+    if (route.available === false) {
+      return { ok: false, reason: 'bound proxy route unavailable' };
+    }
+    boundAddress = route.address;
+  }
+  if (boundAddress === undefined && !allowDirect) {
+    return { ok: false, reason: 'missing bound proxy route' };
+  }
   const timeoutSignal = AbortSignal.timeout(10000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
@@ -3789,7 +3822,7 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, signal, index }
   }
 }
 
-async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, signal }) {
+async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, route, signal, allowDirect = false }) {
   if (!openaiReq || !Array.isArray(openaiReq.messages)) return;
 
   const imageEntries = [];
@@ -3832,8 +3865,10 @@ async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, signal }) 
         imageUrl: entry.imageUrl,
         apiKey,
         proxyAddress,
+        route,
         signal,
         index: entry.index,
+        allowDirect,
       });
     }
   };
@@ -3919,15 +3954,20 @@ async function handleChatCompletions(req, res) {
   }
   apiKey = account.key;
 
-  let proxyAddress = null;
+  let initialRoute = null;
   try {
-    proxyAddress = proxyAddressFor(apiKey);
+    initialRoute = proxyPool.routeFor(apiKey);
   } catch (err) {
     if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
       sendAuthError(res, err.message, false, 'proxy_unavailable');
       return;
     }
   }
+  if (!initialRoute || !initialRoute.available) {
+    sendAuthError(res, initialRoute?.reason || 'Strict bound proxy unavailable', false, 'proxy_unavailable');
+    return;
+  }
+  const proxyAddress = initialRoute.address;
 
   // AbortController 用于客户端断连时真正打断 CC 上游（pi-commandcode-provider 模式）
   // 每次尝试都换一个新的（已 abort 的 signal 不可复用）
@@ -4000,7 +4040,8 @@ async function handleChatCompletions(req, res) {
   if (shouldApplyVisionFallback(model, openaiReq)) {
     await applyVisionFallback(openaiReq, {
       apiKey,
-      proxyAddress,
+      proxyAddress: initialRoute.address,
+      route: initialRoute,
       signal: abortController.signal,
     });
   }
@@ -4052,7 +4093,7 @@ async function handleChatCompletions(req, res) {
     // forwardWithKeyRetry 内部已含每 Key 的 ensureInitialized）
     const { response: ccResponse } = await forwardWithKeyRetry(
       ccBody, apiKey, req.headers, abortController.signal, promptCacheKey,
-      { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'chat' }
+      { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'chat', initialRoute }
     );
 
     if (!ccResponse.ok) {
@@ -5230,15 +5271,20 @@ async function handleMessages(req, res) {
   }
   apiKey = account.key;
 
-  let proxyAddress = null;
+  let initialRoute = null;
   try {
-    proxyAddress = proxyAddressFor(apiKey);
+    initialRoute = proxyPool.routeFor(apiKey);
   } catch (err) {
     if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
       sendAuthError(res, err.message, true, 'proxy_unavailable');
       return;
     }
   }
+  if (!initialRoute || !initialRoute.available) {
+    sendAuthError(res, initialRoute?.reason || 'Strict bound proxy unavailable', true, 'proxy_unavailable');
+    return;
+  }
+  const proxyAddress = initialRoute.address;
 
   const abortController = new AbortController();
   let aborted = false;
@@ -5280,7 +5326,8 @@ async function handleMessages(req, res) {
   if (shouldApplyVisionFallback(model, openaiReq, anthropicReq)) {
     await applyVisionFallback(openaiReq, {
       apiKey,
-      proxyAddress,
+      proxyAddress: initialRoute.address,
+      route: initialRoute,
       signal: abortController.signal,
     });
   }
@@ -5296,13 +5343,13 @@ async function handleMessages(req, res) {
 
   try {
     // 转发到 CC API（遇 Key 失效/限流自动换 Key 重试）
-    const { response: ccResponse, accountKey, route: initialRoute } = await forwardWithKeyRetry(
+    const { response: ccResponse, accountKey, route: initialForwardRoute } = await forwardWithKeyRetry(
       ccBody, apiKey, req.headers, abortController.signal, undefined,
-      { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'messages' }
+      { sessionKey: account.sessionKey, namespace: account.namespace, protocol: 'messages', initialRoute }
     );
     // 关键：若重试换了账号，后续搜索与续写轮必须归属到实际服务 Key 与同一代理路由
     if (accountKey) apiKey = accountKey;
-    const currentRoute = initialRoute;
+    const currentRoute = initialForwardRoute || initialRoute;
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       const mapped = mapCcError(ccResponse.status, errorText);
@@ -5442,7 +5489,10 @@ async function handleMessages(req, res) {
 
             if (isFetch) {
               ctx.fetchCount = (ctx.fetchCount || 0) + 1;
-              const res = await executeWebFetch(p.input?.url, p.input?.format, apiKey, currentRoute?.address, abortController.signal, {
+              if (!currentRoute || currentRoute.available === false) {
+                return { p, tool, isFetch, ok: false, errorCode: 'unavailable', errorMsg: 'bound route unavailable' };
+              }
+              const res = await executeWebFetch(p.input?.url, p.input?.format, apiKey, currentRoute, abortController.signal, {
                 startIndex: p.input?.startIndex,
                 timeout: p.input?.timeout,
                 headers: req.headers,
@@ -5453,9 +5503,14 @@ async function handleMessages(req, res) {
               return { p, tool, isFetch, ok: res.ok, result: res, errorCode: res.errorCode || 'unavailable' };
             } else {
               ctx.searchCount = (ctx.searchCount || 0) + 1;
+              if (!currentRoute || currentRoute.available === false) {
+                return { p, tool, isFetch, ok: false, errorCode: 'unavailable', errorMsg: 'bound route unavailable' };
+              }
               const res = await executeWebSearch(p.input?.query, apiKey, req.headers, abortController.signal, {
                 allowedDomains: tool?.allowedDomains,
                 blockedDomains: tool?.blockedDomains,
+                route: currentRoute,
+                proxyAddress: currentRoute.address,
               });
               return { p, tool, isFetch, ok: !res.errorCode, result: res, errorCode: res.errorCode };
             }

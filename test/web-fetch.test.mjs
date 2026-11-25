@@ -452,3 +452,124 @@ test('web_fetch：超过 max_uses → max_uses_exceeded 错误块并移出定义
     await s.close();
   }
 });
+
+test('DNS rebinding：解析两次给不同 IP，必须拒绝', async () => {
+  // 模拟 DNS Rebinding：第一次解析为合法公网 IP，第二次解析重绑定为 127.0.0.1
+  let callCount = 0;
+  const mockRebindingLookup = async (hostname) => {
+    callCount++;
+    if (callCount === 1) {
+      return [{ address: '93.184.216.34', family: 4 }];
+    }
+    return [{ address: '127.0.0.1', family: 4 }];
+  };
+
+  const res = await executeWebFetch({
+    url: 'https://evil-rebind.com/page',
+  }, 'markdown', 'test_key', { address: null, available: true }, null, {
+    lookupImpl: mockRebindingLookup,
+    upstreamFetch: async () => ({ ok: true, status: 200, json: async () => ({ content: 'secret' }) }),
+  });
+
+  assert.equal(res.ok, false);
+  assert.ok(res.error.includes('DNS rebinding') || res.error.includes('blocked IP'));
+  assert.equal(res.errorCode, 'invalid_input');
+
+  // 对照组：解析两次为稳定相同公网 IP，顺利放行
+  const mockStableLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+  const resOk = await executeWebFetch({
+    url: 'https://legit-domain.com/page',
+  }, 'markdown', 'test_key', { address: null, available: true }, null, {
+    lookupImpl: mockStableLookup,
+    upstreamFetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ content: 'safe content' })));
+          controller.close();
+        },
+      }),
+    }),
+  });
+  assert.equal(resOk.ok, true);
+});
+
+test('redirect 到内网：必须拒绝', async () => {
+  const mockLookup = async (hostname) => {
+    if (hostname.includes('internal') || hostname.includes('localhost') || hostname === '127.0.0.1') {
+      return [{ address: '127.0.0.1', family: 4 }];
+    }
+    return [{ address: '93.184.216.34', family: 4 }];
+  };
+
+  // 模拟上游返回 302 重定向到内网地址
+  const mockFetchWith302ToInternal = async (url, opts) => {
+    if (opts.redirect !== 'manual') {
+      throw new Error('fetcher must be called with redirect: manual');
+    }
+    return {
+      ok: false,
+      status: 302,
+      headers: new Headers({ location: 'http://127.0.0.1/admin/secret' }),
+    };
+  };
+
+  const res = await executeWebFetch({
+    url: 'https://external-entry.com/redirect',
+  }, 'markdown', 'test_key', { address: null, available: true }, null, {
+    lookupImpl: mockLookup,
+    upstreamFetch: mockFetchWith302ToInternal,
+  });
+
+  assert.equal(res.ok, false);
+  assert.ok(res.error.includes('Redirect') || res.error.includes('blocked'));
+  assert.equal(res.errorCode, 'invalid_input');
+});
+
+test('响应体上限：超出上限或恶意大响应拒绝并流式打断', async () => {
+  const mockLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
+  // 1. Content-Length 超限预先拦截
+  const resHeader = await executeWebFetch({
+    url: 'https://huge-file.com/data',
+  }, 'markdown', 'test_key', { address: null, available: true }, null, {
+    lookupImpl: mockLookup,
+    upstreamFetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-length': String(10 * 1024 * 1024) }), // 10MB
+    }),
+  });
+  assert.equal(resHeader.ok, false);
+  assert.ok(resHeader.error.includes('size limit') || resHeader.error.includes('too large'));
+
+  // 2. 流式读取累计字节超限并打断 reader
+  let canceled = false;
+  const chunk = new Uint8Array(512 * 1024); // 512KB
+  const hugeStream = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+
+  const resStream = await executeWebFetch({
+    url: 'https://stream-bomb.com/data',
+  }, 'markdown', 'test_key', { address: null, available: true }, null, {
+    lookupImpl: mockLookup,
+    upstreamFetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: hugeStream,
+    }),
+  });
+  assert.equal(resStream.ok, false);
+  assert.ok(resStream.error.includes('size limit') || resStream.error.includes('exceeded'));
+  assert.equal(canceled, true, '流式超限必须立即 cancel reader 释放资源');
+});
+
