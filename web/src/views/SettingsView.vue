@@ -322,6 +322,10 @@ onMounted(() => {
       <div class="section-title">
         📊 官方额度与调度
         <span class="probe-pill">额度采集是后台任务，不会在推理热路径上查额度</span>
+        <button class="btn btn-sm btn-primary" style="margin-left: auto" type="button" :disabled="saving || loading" @click="saveConfig">
+          <span v-if="saving" class="loading"></span>
+          {{ saving ? '保存中…' : '💾 保存配置' }}
+        </button>
       </div>
       <div class="section-body">
         <div class="form-row">
@@ -340,7 +344,7 @@ onMounted(() => {
         </div>
         <div class="hint" style="margin-top: 0; margin-bottom: 14px">
           警戒阈值是<strong>软阈值</strong>：到 90% 只降低优先级，不封禁；真正的封禁只看官方是否明确耗尽。
-          额度感知策略的选择顺序：<strong>五小时窗口剩余 → 周剩余 → 月剩余</strong>，
+          额度感知策略的选择顺序：<strong>五小时窗口剩余 → 周剩余 → 月度窗口重置时间（越近越优先）</strong>，
           同档内优先空闲、较久未用的账号，避免并发把单个 Key 打爆。
           单账号并发上限填 0 表示不限（多账号建议设 2~4）。
         </div>
@@ -412,12 +416,6 @@ onMounted(() => {
           5小时窗口预热：窗口到期重置后自动发送极小请求激活下一轮 5 小时计时；尚未开窗（重置时间未知）的账号也会主动开窗。<br />
           跨账号重试只在「下游尚未收到任何内容」时生效；已输出 SSE / 工具调用后绝不重放。
         </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" :disabled="saving || loading" @click="saveConfig">
-            <span v-if="saving" class="loading"></span>
-            {{ saving ? '保存中…' : '💾 保存配置' }}
-          </button>
-        </div>
       </div>
     </div>
 
@@ -425,6 +423,10 @@ onMounted(() => {
       <div class="section-title">
         🔔 告警通知
         <span class="probe-pill">默认关闭；只发事件，不发凭据与正文</span>
+        <button class="btn btn-sm btn-primary" style="margin-left: auto" type="button" :disabled="saving || loading" @click="saveConfig">
+          <span v-if="saving" class="loading"></span>
+          {{ saving ? '保存中…' : '💾 保存配置' }}
+        </button>
       </div>
       <div class="section-body">
         <div class="form-row">
@@ -505,12 +507,6 @@ onMounted(() => {
         </div>
         <div class="hint" style="margin-top: 0">
           测试通知会跳过事件去重，但仍然受地址校验与超时约束；发送结果不影响推理服务。
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" :disabled="saving || loading" @click="saveConfig">
-            <span v-if="saving" class="loading"></span>
-            {{ saving ? '保存中…' : '💾 保存配置' }}
-          </button>
         </div>
       </div>
     </div>
