@@ -750,3 +750,278 @@ test('全链路集成 4c：出站代理一致性 - rotate 轮换场景下辅助�
   }
 });
 
+
+test('全链路集成 4d：出站代理一致性 - 同 key 重试时 route 绝对不变', async () => {
+  const proxyA = await startRecordingProxy();
+  const proxyB = await startRecordingProxy();
+
+  let genCount = 0;
+  const upstream = await startMockUpstream({
+    onRequest: (req, res) => {
+      if (req.url === '/alpha/generate') {
+        genCount++;
+        if (genCount === 1) {
+          // 第 1 次尝试：模拟上游 output ceiling 降档拒绝（触发同一 Key 重试同一请求）
+          json(res, {
+            error: { message: 'max_tokens: 100 > 50' },
+          }, 400);
+          return true;
+        } else {
+          // 第 2 次尝试（同一 Key 降档重发）：成功返回
+          sse(res, nd(
+            { type: 'start' }, { type: 'start-step' },
+            { type: 'text-start' }, { type: 'text-delta', text: 'Retry on same route succeeded.' }, { type: 'text-end' },
+            { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 40, outputTokens: 5 } },
+            { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 40, outputTokens: 5 } },
+          ));
+          return true;
+        }
+      }
+      return false;
+    },
+  });
+
+  const workdir = mkdtempSync(join(tmpdir(), 'ccp-peer-route-retry-'));
+  seedConfig(workdir, {
+    apiBase: `http://127.0.0.1:${upstream.port}`,
+    proxies: [proxyA.url, proxyB.url],
+  });
+
+  const dataDir = join(workdir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const keyFp = createHash('sha256').update('user_test').digest('hex').slice(0, 16);
+  writeFileSync(join(dataDir, 'proxies.json'), JSON.stringify({
+    entries: [
+      { id: 'p_a', value: proxyA.url, enabled: true },
+      { id: 'p_b', value: proxyB.url, enabled: true },
+    ],
+    bindings: {
+      [keyFp]: { mode: 'rotate' },
+    },
+  }, null, 2));
+
+  const proxy = await startProxy({
+    cwd: workdir,
+    upstreamPort: upstream.port,
+    env: {
+      CC_DATA_DIR: dataDir,
+      CC_API_KEY: 'test_key_1',
+    },
+  });
+
+  try {
+    const r = await proxy.post('/v1/messages', {
+      model: 'claude-3-7-sonnet',
+      stream: true,
+      messages: [{ role: 'user', content: 'test same key retry' }],
+      max_tokens: 100,
+    }, { 'x-api-key': 'user_test' });
+
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.ok(text.includes('Retry on same route succeeded.'));
+    assert.equal(genCount, 2, '上游必须收到 2 次 generate 尝试（首轮 400 + 降档重试）');
+
+    // 关键断言：同 Key 重试坚决复用首选代理，绝不能因 rotate 轮换到另一条代理
+    const hitsA = proxyA.hits.length;
+    const hitsB = proxyB.hits.length;
+    assert.ok(
+      (hitsA >= 2 && hitsB === 0) || (hitsB >= 2 && hitsA === 0),
+      `同 Key 重试两次必须全部打在同一条代理上！当前 hitsA=${hitsA}, hitsB=${hitsB}`
+    );
+  } finally {
+    await proxy.kill();
+    await upstream.close();
+    await proxyA.close();
+    await proxyB.close();
+  }
+});
+
+test('全链路集成 4e：出站代理一致性 - rotate 到新 key 后辅助请求的 route 必须跟着换', async () => {
+  const proxyA = await startRecordingProxy();
+  const proxyB = await startRecordingProxy();
+
+  const KEY_A = 'user_aaa1111111111111111111111111';
+  const KEY_B = 'user_bbb2222222222222222222222222';
+  const CLIENT_SECRET = 'client_secret_test_4e';
+
+  let genTotal = 0;
+  let firstKey = '';
+  let secondKey = '';
+  let searchHits = [];
+
+  const upstream = await startMockUpstream({
+    onRequest: (req, res) => {
+      const auth = req.headers['authorization'] || '';
+      if (req.url === '/alpha/generate') {
+        genTotal++;
+        if (genTotal === 1) {
+          // 第 1 个被挑中的 key：返回 429 额度耗尽，触发换 key 到第 2 个 key
+          firstKey = auth;
+          json(res, { error: { message: 'Usage limit exceeded for first key' } }, 429);
+          return true;
+        } else if (genTotal === 2) {
+          // 第 2 个 key（新 key）：首轮成功返回 web_search tool_call
+          secondKey = auth;
+          assert.notEqual(firstKey, secondKey, '必须切换到不同的 Key');
+          sse(res, nd(
+            { type: 'start' }, { type: 'start-step' },
+            { type: 'tool-call', toolCallId: 'call_rot1', toolName: 'web_search', input: { query: 'test rotate to new key' } },
+            { type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 50, outputTokens: 5 } },
+            { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 50, outputTokens: 5 } },
+          ));
+          return true;
+        } else {
+          // 续写轮收尾
+          assert.equal(auth, secondKey, '续写轮必须归属新 key');
+          sse(res, nd(
+            { type: 'start' }, { type: 'start-step' },
+            { type: 'text-start' }, { type: 'text-delta', text: 'Search on new key route complete.' }, { type: 'text-end' },
+            { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 80, outputTokens: 6 } },
+            { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 80, outputTokens: 6 } },
+          ));
+          return true;
+        }
+      }
+      if (req.url === '/alpha/web-search') {
+        searchHits.push(auth);
+        json(res, { results: [{ url: 'https://example.com/item', title: 'Item' }] });
+        return true;
+      }
+      return false;
+    },
+  });
+
+  const workdir = mkdtempSync(join(tmpdir(), 'ccp-peer-route-newkey-'));
+  seedConfig(workdir, {
+    apiBase: `http://127.0.0.1:${upstream.port}`,
+    apiKey: [KEY_A, KEY_B],
+    proxyKey: CLIENT_SECRET,
+    proxies: [proxyA.url, proxyB.url],
+    webSearch: true,
+  });
+
+  const dataDir = join(workdir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const fpA = createHash('sha256').update(KEY_A).digest('hex').slice(0, 16);
+  const fpB = createHash('sha256').update(KEY_B).digest('hex').slice(0, 16);
+
+  writeFileSync(join(dataDir, 'proxies.json'), JSON.stringify({
+    entries: [
+      { id: 'p_a', value: proxyA.url, enabled: true },
+      { id: 'p_b', value: proxyB.url, enabled: true },
+    ],
+    bindings: {
+      [fpA]: { proxyIndex: 0, mode: 'bind' }, // KEY_A 绑定 proxyA
+      [fpB]: { proxyIndex: 1, mode: 'bind' }, // KEY_B 绑定 proxyB
+    },
+  }, null, 2));
+
+  const proxy = await startProxy({
+    cwd: workdir,
+    upstreamPort: upstream.port,
+    env: {
+      CC_WEB_SEARCH: '1',
+      CC_DATA_DIR: dataDir,
+    },
+  });
+
+  try {
+    const r = await proxy.post('/v1/messages', {
+      model: 'claude-3-7-sonnet',
+      stream: true,
+      messages: [{ role: 'user', content: 'trigger switch and search' }],
+      tools: [WEB_SEARCH_TOOL],
+      max_tokens: 100,
+    }, { 'x-api-key': CLIENT_SECRET });
+
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.ok(text.includes('Search on new key route complete.'));
+
+    assert.equal(genTotal, 3, '必须经历 1 次 429 失败 + 换 key 后的 2 轮 generate');
+    assert.equal(searchHits.length, 1, 'web-search 必须被调用 1 次');
+    assert.equal(searchHits[0], secondKey, 'web-search 辅助请求必须归属于新 key');
+
+    // 关键断言：
+    // 老 key 对应的代理只收到第 1 次失败尝试，绝对不能收到 web-search 辅助请求！
+    // 新 key 对应的代理必须承载换 key 后的首轮 generate、web-search 辅助请求与续写轮！
+    const firstIsA = firstKey.includes(KEY_A);
+    const oldProxy = firstIsA ? proxyA : proxyB;
+    const newProxy = firstIsA ? proxyB : proxyA;
+
+    const oldGenHits = oldProxy.hits.filter(h => h.path?.includes('generate') || h.url?.includes('generate'));
+    assert.equal(oldGenHits.length, 1, '老 key 代理仅承载第 1 次失败的 generate 请求');
+    const newGenHits = newProxy.hits.filter(h => h.path?.includes('generate') || h.url?.includes('generate'));
+    assert.equal(newGenHits.length, 2, '新 key 代理承载主请求与续写轮 2 次 generate 请求');
+
+    const searchOnOld = oldProxy.hits.find(h => h.path?.includes('web-search') || h.url?.includes('web-search'));
+    assert.equal(searchOnOld, undefined, '老 key 代理绝对不能收到任何 web-search 辅助请求！');
+    const searchOnNew = newProxy.hits.find(h => h.path?.includes('web-search') || h.url?.includes('web-search'));
+    assert.ok(searchOnNew, '新 key 代理必须承载 web-search 辅助请求！');
+  } finally {
+    await proxy.kill();
+    await upstream.close();
+    await proxyA.close();
+    await proxyB.close();
+  }
+});
+
+test('全链路集成 4f：出站代理一致性 - 缺少可用 route 时辅助请求抛错 503 阻断', async () => {
+  const KEY_STRICT = 'user_strict1111111111111111111111';
+  const CLIENT_SECRET = 'client_secret_strict';
+
+  const upstream = await startMockUpstream({
+    onRequest: (req, res) => {
+      return false;
+    },
+  });
+
+  const workdir = mkdtempSync(join(tmpdir(), 'ccp-peer-route-fail-'));
+  seedConfig(workdir, {
+    apiBase: `http://127.0.0.1:${upstream.port}`,
+    apiKey: [KEY_STRICT],
+    proxyKey: CLIENT_SECRET,
+    webSearch: true,
+  });
+
+  const dataDir = join(workdir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+  const keyFp = createHash('sha256').update(KEY_STRICT).digest('hex').slice(0, 16);
+  // 严格绑定到一个不可用的代理索引（如禁用）
+  writeFileSync(join(dataDir, 'proxies.json'), JSON.stringify({
+    entries: [
+      { id: 'p_bad', value: 'http://127.0.0.1:1', enabled: false }, // 禁用
+    ],
+    bindings: {
+      [keyFp]: { proxyIndex: 0, mode: 'strict_bind' },
+    },
+  }, null, 2));
+
+  const proxy = await startProxy({
+    cwd: workdir,
+    upstreamPort: upstream.port,
+    env: {
+      CC_WEB_SEARCH: '1',
+      CC_DATA_DIR: dataDir,
+    },
+  });
+
+  try {
+    const r = await proxy.post('/v1/messages', {
+      model: 'claude-3-7-sonnet',
+      stream: true,
+      messages: [{ role: 'user', content: 'test strict unavailable' }],
+      tools: [WEB_SEARCH_TOOL],
+      max_tokens: 100,
+    }, { 'x-api-key': CLIENT_SECRET });
+
+    // 关键断言：严格绑定的代理不可用时，直接返回 503 阻断，绝不放行、绝不回退直连
+    assert.equal(r.status, 503);
+    const body = await r.json();
+    assert.equal(body.error?.type, 'overloaded_error');
+  } finally {
+    await proxy.kill();
+    await upstream.close();
+  }
+});

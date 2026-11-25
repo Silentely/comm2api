@@ -7,6 +7,7 @@ import {
   createFetchCache,
   clearWebFetchCache,
   formatFetchOutput,
+  clampFetchTimeoutSeconds,
   WEB_FETCH_ROUTE,
   WEB_FETCH_SCHEMA,
 } from '../lib/web-fetch.mjs';
@@ -573,3 +574,47 @@ test('响应体上限：超出上限或恶意大响应拒绝并流式打断', as
   assert.equal(canceled, true, '流式超限必须立即 cancel reader 释放资源');
 });
 
+
+test('timeout 钳制：参数与环境变量 CC_WEB_FETCH_TIMEOUT_MS 超限时必须夹在 [1s, 60s]', async () => {
+  const origEnv = process.env.CC_WEB_FETCH_TIMEOUT_MS;
+  try {
+    process.env.CC_WEB_FETCH_TIMEOUT_MS = '999999';
+    assert.equal(clampFetchTimeoutSeconds(), 60, '环境变量 999999ms 必须被钳制为 60s');
+    assert.equal(clampFetchTimeoutSeconds(undefined), 60);
+
+    assert.equal(clampFetchTimeoutSeconds(120), 60, '入参 120s 必须被钳制为 60s');
+    assert.equal(clampFetchTimeoutSeconds(0.2), 1, '入参 0.2s 必须被钳制为 1s');
+    assert.equal(clampFetchTimeoutSeconds(-10), 60, '非法负数回退环境变量并钳制为 60s');
+
+    delete process.env.CC_WEB_FETCH_TIMEOUT_MS;
+    assert.equal(clampFetchTimeoutSeconds(), 15, '缺省时为 15s');
+    assert.equal(clampFetchTimeoutSeconds(30), 30, '合法中间值保持不变');
+  } finally {
+    if (origEnv !== undefined) {
+      process.env.CC_WEB_FETCH_TIMEOUT_MS = origEnv;
+    } else {
+      delete process.env.CC_WEB_FETCH_TIMEOUT_MS;
+    }
+  }
+});
+
+test('端口限制补偿：非标准端口必须被 guardFetchUrl 明确拒绝', () => {
+  assert.equal(guardFetchUrl('http://example.com:8080/path').ok, false);
+  assert.equal(guardFetchUrl('https://example.com:6379/').ok, false);
+  assert.equal(guardFetchUrl('http://example.com:22/').ok, false);
+  assert.equal(guardFetchUrl('http://example.com:80/path').ok, true);
+  assert.equal(guardFetchUrl('https://example.com:443/path').ok, true);
+  assert.equal(guardFetchUrl('https://example.com/path').ok, true);
+});
+
+test('缺 route 时 executeWebFetch 必须抛错阻断（而不是返回错误块）', async () => {
+  await assert.rejects(
+    async () => {
+      await executeWebFetch({ url: 'https://example.com' }, 'markdown', 'key');
+    },
+    (err) => {
+      assert.equal(err.code, 'PROXY_ROUTE_UNAVAILABLE');
+      return true;
+    }
+  );
+});

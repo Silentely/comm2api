@@ -3282,6 +3282,8 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
   // 本请求已经试过的**代理**（按池内 id）：一个代理连不上时换个代理再试一次，
   // 但同一个代理不会在同一次请求里被重复选到。
   const triedProxies = new Set();
+  // 记录每个 Key 本次请求内绑定的代理出口：同 Key 重试坚决复用不换 route，跨 Key 轮换则为新 Key 重新绑定
+  const keyRoutes = new Map();
   // 换代理的次数上限：与池子大小同阶。没有它，一个「所有代理都不可达」的请求
   // 会在 routeFor 反复返回同一条时原地打转。
   let proxyAttempts = 0;
@@ -3298,10 +3300,20 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
 
     // 每条 Key 的代理绑定：auto 静态绑定（故障时转移）/ bind 固定（故障时临时转移）/
     // strict_bind 严格固定（故障时失败关闭）/ rotate 每次轮换。
-    // 首轮请求优先复用初始锁定的 initialRoute，确保 rotate 模式下主请求与辅助请求出口完全一致
-    const route = (attempt === 1 && triedProxies.size === 0 && ctx.initialRoute && key === firstKey)
-      ? ctx.initialRoute
-      : proxyPool.routeFor(key, triedProxies);
+    // 同 Key 重试（无论同请求内重发还是上游闪断重发）：坚决复用该 Key 最初选定的同一条代理，严禁换出口！
+    // 跨 Key 轮换（rotate 换到新 key）：必须为新 Key 重新获取并绑定其出口，严禁继承老 Key 的出口！
+    let route;
+    if (triedProxies.size === 0 && key === firstKey && ctx.initialRoute) {
+      route = ctx.initialRoute;
+      if (!keyRoutes.has(key)) keyRoutes.set(key, route);
+    } else if (triedProxies.size === 0 && keyRoutes.has(key)) {
+      route = keyRoutes.get(key);
+    } else {
+      route = proxyPool.routeFor(key, triedProxies);
+      if (triedProxies.size === 0 && route && route.available) {
+        keyRoutes.set(key, route);
+      }
+    }
     if (!route.available) {
       log('warn', '严格绑定的出站代理不可用，跳过该账号', {
         keyId: accountIdOf(key), reason: route.reason, attempt,
@@ -3387,6 +3399,7 @@ async function forwardWithKeyRetry(ccBody, firstKey, incomingHeaders, signal, pr
           model, requestedMaxTokens: sent, ceiling, status: response.status,
         });
         // 不记这个 Key 的失败：这是请求侧的预算问题，与该 Key 的健康/额度无关
+        if (transport) triedProxies.delete(transport.id);
         attempt--;   // 降档重发不计入 Key 轮换次数：这不是「换一个 Key」，是重发同一请求
         continue;
       }
@@ -3594,7 +3607,9 @@ async function executeWebSearch(query, apiKey, incomingHeaders = {}, signal, opt
     } else if (opts.route) {
       if (opts.route.available === false) {
         log('warn', 'Web search bound route is unavailable', { reason: opts.route.reason });
-        return { errorCode: 'unavailable' };
+        const err = new Error(opts.route.reason || 'Bound proxy route is unavailable');
+        err.code = 'PROXY_ROUTE_UNAVAILABLE';
+        throw err;
       }
       boundProxyAddress = opts.route.address;
     } else if (opts.allowDirect) {
@@ -3602,8 +3617,10 @@ async function executeWebSearch(query, apiKey, incomingHeaders = {}, signal, opt
     }
 
     if (boundProxyAddress === undefined) {
-      log('warn', 'Web search missing bound route, rejecting helper request without fallback');
-      return { errorCode: 'unavailable' };
+      log('warn', 'Web search missing bound route, throwing error to fail fast');
+      const err = new Error('Missing bound proxy route for web_search helper request');
+      err.code = 'PROXY_ROUTE_UNAVAILABLE';
+      throw err;
     }
 
     // 经 upstreamFetch：辅助请求复用首轮 route 绑定的 boundProxyAddress
@@ -3620,7 +3637,7 @@ async function executeWebSearch(query, apiKey, incomingHeaders = {}, signal, opt
     }
     data = await r.json();
   } catch (e) {
-    if (signal?.aborted) throw e; // 客户端断连，交给上层收尾
+    if (signal?.aborted || e.code === 'PROXY_ROUTE_UNAVAILABLE') throw e; // 客户端断连或代理不可用，抛出阻断
     log('warn', 'Web search failed', { message: e.message, timedOut: timeout.aborted });
     return { errorCode: 'unavailable' };
   }
@@ -3759,12 +3776,16 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, 
   let boundAddress = proxyAddress;
   if (boundAddress === undefined && route) {
     if (route.available === false) {
-      return { ok: false, reason: 'bound proxy route unavailable' };
+      const err = new Error(route.reason || 'Bound proxy route is unavailable');
+      err.code = 'PROXY_ROUTE_UNAVAILABLE';
+      throw err;
     }
     boundAddress = route.address;
   }
   if (boundAddress === undefined && !allowDirect) {
-    return { ok: false, reason: 'missing bound proxy route' };
+    const err = new Error('Missing bound proxy route for vision fallback');
+    err.code = 'PROXY_ROUTE_UNAVAILABLE';
+    throw err;
   }
   const timeoutSignal = AbortSignal.timeout(10000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -3815,6 +3836,7 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, 
     }
     return { ok: true, text: description.trim() };
   } catch (err) {
+    if (err.code === 'PROXY_ROUTE_UNAVAILABLE') throw err;
     const reason = err.name === 'TimeoutError' || (combinedSignal.aborted && timeoutSignal.aborted)
       ? 'timeout'
       : (err.message || 'unknown error');
@@ -4038,12 +4060,21 @@ async function handleChatCompletions(req, res) {
 
   // 纯文本模型多模态辅助识图降级（Vision Fallback）
   if (shouldApplyVisionFallback(model, openaiReq)) {
-    await applyVisionFallback(openaiReq, {
-      apiKey,
-      proxyAddress: initialRoute.address,
-      route: initialRoute,
-      signal: abortController.signal,
-    });
+    try {
+      await applyVisionFallback(openaiReq, {
+        apiKey,
+        proxyAddress: initialRoute.address,
+        route: initialRoute,
+        signal: abortController.signal,
+      });
+    } catch (e) {
+      if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
+        setAccess(res, 'outcome', 'proxy_unavailable');
+        sendJSON(res, 503, { error: { message: e.message, type: 'api_error' } });
+        return;
+      }
+      throw e;
+    }
   }
   if (aborted || abortController.signal.aborted) return;
 
@@ -5324,12 +5355,21 @@ async function handleMessages(req, res) {
 
   // 纯文本模型多模态辅助识图降级（Vision Fallback）
   if (shouldApplyVisionFallback(model, openaiReq, anthropicReq)) {
-    await applyVisionFallback(openaiReq, {
-      apiKey,
-      proxyAddress: initialRoute.address,
-      route: initialRoute,
-      signal: abortController.signal,
-    });
+    try {
+      await applyVisionFallback(openaiReq, {
+        apiKey,
+        proxyAddress: initialRoute.address,
+        route: initialRoute,
+        signal: abortController.signal,
+      });
+    } catch (e) {
+      if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
+        setAccess(res, 'outcome', 'proxy_unavailable');
+        sendAnthropicError(res, 503, 'api_error', e.message);
+        return;
+      }
+      throw e;
+    }
   }
   if (aborted || abortController.signal.aborted) return;
 
@@ -5490,7 +5530,9 @@ async function handleMessages(req, res) {
             if (isFetch) {
               ctx.fetchCount = (ctx.fetchCount || 0) + 1;
               if (!currentRoute || currentRoute.available === false) {
-                return { p, tool, isFetch, ok: false, errorCode: 'unavailable', errorMsg: 'bound route unavailable' };
+                const err = new Error(currentRoute?.reason || 'Bound proxy route unavailable for web_fetch');
+                err.code = 'PROXY_ROUTE_UNAVAILABLE';
+                throw err;
               }
               const res = await executeWebFetch(p.input?.url, p.input?.format, apiKey, currentRoute, abortController.signal, {
                 startIndex: p.input?.startIndex,
@@ -5504,7 +5546,9 @@ async function handleMessages(req, res) {
             } else {
               ctx.searchCount = (ctx.searchCount || 0) + 1;
               if (!currentRoute || currentRoute.available === false) {
-                return { p, tool, isFetch, ok: false, errorCode: 'unavailable', errorMsg: 'bound route unavailable' };
+                const err = new Error(currentRoute?.reason || 'Bound proxy route unavailable for web_search');
+                err.code = 'PROXY_ROUTE_UNAVAILABLE';
+                throw err;
               }
               const res = await executeWebSearch(p.input?.query, apiKey, req.headers, abortController.signal, {
                 allowedDomains: tool?.allowedDomains,
@@ -5616,6 +5660,13 @@ async function handleMessages(req, res) {
       } catch (e) {
         if (aborted) {
           // 客户端已断连，只清理（close handler 已调用 abortController.abort()）
+        } else if (e.code === 'PROXY_ROUTE_UNAVAILABLE') {
+          setAccess(res, 'outcome', 'proxy_unavailable');
+          log('error', 'Proxy route unavailable for helper request', { reason: e.message });
+          if (!started) {
+            sendAnthropicError(res, 503, 'api_error', e.message || 'Bound proxy route is unavailable');
+          }
+          return;
         } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
           log('warn', 'Stream idle timeout', {
             path: '/v1/messages',
