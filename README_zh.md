@@ -163,7 +163,7 @@ for chunk in response:
 |---|---|
 | 🚀 **[部署指南 (Deployment)](docs/deployment.md)** | Docker、Compose、GHCR 镜像、Systemd、生产级 Nginx 反代配置、Keep-Alive 时序与内存调优 |
 | ⚙️ **[配置手册 (Configuration)](docs/configuration.md)** | `config.json` 详解、`.env` 配置、完整环境变量清单、出站代理池语法规则与 Key 绑定 |
-| 🔌 **[API 接口参考 (API Reference)](docs/api.md)** | Chat Completions、Messages、Responses API 协议规范、Web Search 服务端工具实现与错误码映射 |
+| 🔌 **[API 接口参考 (API Reference)](docs/api.md)** | Chat Completions、Messages、Responses API 协议规范、Web Search / Web Fetch 服务端工具实现与错误码映射 |
 | 📊 **[官方额度与调度 (Quota & Scheduling)](docs/quota.md)** | 官方额度采集原理、账号状态机运转逻辑、多账号轮询与额度耗尽自动切换机制 |
 | 🛡️ **[底层架构与反检测 (Architecture)](docs/architecture.md)** | 硬件指纹派生算法、上游 9 键通信信封、首字未吐闪断重试、自适应 Token 上限学习与流控背压 |
 | 🛠️ **[管理后台 API 契约 (Admin API)](docs/admin-api.md)** | 后台前后端唯一接口约定（Key 管理、用量统计、代理测试、模型配置） |
@@ -181,7 +181,8 @@ comm2api/
 │   ├── auth.mjs              # 2API Key 与访问鉴权逻辑
 │   ├── outbound-proxy.mjs    # 出站代理池与 CONNECT 隧道
 │   ├── quota-poller.mjs      # 官方额度采集与调度状态机
-│   └── web-search.mjs        # Anthropic 服务端 Web Search 执行器
+│   ├── web-search.mjs        # Anthropic 服务端 Web Search 执行器
+│   └── web-fetch.mjs         # Anthropic 服务端 Web Fetch 执行器（内置 SSRF 防护）
 ├── web/                      # 管理后台前端源码 (Vue 3 + Tailwind CSS)
 ├── docs/                     # 模块化技术与使用文档
 │   ├── deployment.md         # 部署指南

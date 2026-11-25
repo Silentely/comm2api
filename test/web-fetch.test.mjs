@@ -7,6 +7,7 @@ import {
   createFetchCache,
   clearWebFetchCache,
   formatFetchOutput,
+  decodeWebFetchResultBlocks,
   clampFetchTimeoutSeconds,
   WEB_FETCH_ROUTE,
   WEB_FETCH_SCHEMA,
@@ -605,6 +606,29 @@ test('端口限制补偿：非标准端口必须被 guardFetchUrl 明确拒绝',
   assert.equal(guardFetchUrl('http://example.com:80/path').ok, true);
   assert.equal(guardFetchUrl('https://example.com:443/path').ok, true);
   assert.equal(guardFetchUrl('https://example.com/path').ok, true);
+});
+
+test('历史回放：官方 web_fetch_result 的嵌套 document 形态必须解出正文', () => {
+  assert.equal(
+    decodeWebFetchResultBlocks({
+      type: 'web_fetch_result',
+      url: 'https://example.com/doc',
+      content: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'nested document body' } },
+    }),
+    'nested document body',
+  );
+  assert.equal(
+    decodeWebFetchResultBlocks([
+      { type: 'text', text: 'first' },
+      { type: 'web_fetch_result', content: { type: 'document', source: { type: 'text', data: 'second' } } },
+    ]),
+    'first\nsecond',
+  );
+  assert.equal(
+    decodeWebFetchResultBlocks({ type: 'web_fetch_tool_result_error', error_code: 'url_not_accessible' }),
+    'Fetch failed: url_not_accessible',
+  );
+  assert.equal(decodeWebFetchResultBlocks('plain string'), 'plain string');
 });
 
 test('缺 route 时 executeWebFetch 必须抛错阻断（而不是返回错误块）', async () => {

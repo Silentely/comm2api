@@ -128,6 +128,15 @@ curl http://127.0.0.1:3050/v1/messages \
 - 若未启用 `CC_WEB_SEARCH`：代理会自动剥离未实现的服务端工具定义，防止上游因缺乏 Schema 抛出 400 异常。
 - 若启用 `CC_WEB_SEARCH=1`：代理会捕获模型的 `web_search` 调用，直接调用上游自带的 `/alpha/web-search` 获取真实网络结果，并将结果作为 `server_tool_use` / `web_search_tool_result` 回填模型完成单轮流式续写。
 
+### Web Fetch 服务端工具实现
+
+同一个 `CC_WEB_SEARCH=1` 开关同时启用官方 `web_fetch_20250910` 服务端工具：
+- 代理把模型的 `web_fetch` 调用交给上游 `/alpha/web-fetch` 执行，支持 `markdown` / `text` / `html` 三种输出格式与 `startIndex` 续读。
+- 服务端执行后按 `server_tool_use` / `web_fetch_tool_result` 成对下发，并在 `message_delta.usage.server_tool_use.web_fetch_requests` 中聚合调用次数。
+- 抓取目标会做 SSRF 校验：仅允许 `http` / `https`、标准端口 80/443，拦截私网、环回、链路本地与云元数据地址，重定向逐跳复验；响应体上限 2 MB，结果缓存 15 分钟。
+- 客户端在后续轮次回放的 `web_fetch_tool_result` 会被还原为模型可读文本，不会重复触发网络抓取。
+- `web_search` 与 `web_fetch` 共享单次请求的工具调用预算与轮数上限。
+
 ---
 
 ## POST /v1/responses (OpenAI Responses API)

@@ -376,7 +376,7 @@ Key 列表项（下称 `KeyItem`）：
   "webSearch": false, "modelRefreshIntervalMs": 300000,
   "upstreamProxy": "", "proxies": ["http://127.0.0.1:7890"], "proxyFile": "",
   "strategy": "round_robin", "defaultModel": "deepseek/deepseek-v4-flash",
-  "dataDir": "/app/data", "configPath": "/app/config.json",
+  "visionFallbackModel": "", "dataDir": "/app/data", "configPath": "/app/config.json",
   "settingsPath": "/app/data/settings.json",
   "storage": { "mode": "file", "dataDir": "/app/data", "redis": { "enabled": false } },
   "version": "1.3.0",
@@ -403,6 +403,7 @@ Key 列表项（下称 `KeyItem`）：
 ```json
 { "strategy": "round_robin" | "random" | "fill",
   "defaultModel": "deepseek/deepseek-v4-flash",
+  "visionFallbackModel": "gpt-5.6-luna",
   "zdr": false,
   "upstreamProxy": "http://127.0.0.1:7890",
   "logLevel": "info", "logFile": "",

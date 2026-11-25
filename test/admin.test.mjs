@@ -146,6 +146,22 @@ test("clientIp 安全防护：未受信任直连时防伪造，受信任时优�
   };
   assert.equal(clientIp(loopbackWithCf), "203.0.113.195", "受信任代理时优先使用 CF-Connecting-IP");
 
+  // 2b. 伪造的非 IP 头部必须被忽略：否则任意字符串都会成为限速键并写进日志
+  const loopbackWithJunk = {
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: {
+      "cf-connecting-ip": "not-an-ip",
+      "x-forwarded-for": "unknown, 203.0.113.77",
+    },
+  };
+  assert.equal(clientIp(loopbackWithJunk), "203.0.113.77", "非法 CF 头部应回退到 XFF 中的首个合法 IP");
+
+  const loopbackWithOnlyJunk = {
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: { "cf-connecting-ip": "evil", "x-forwarded-for": "nope" },
+  };
+  assert.equal(clientIp(loopbackWithOnlyJunk), "127.0.0.1", "代理头全部非法时回退到 socket 地址");
+
   // 3. 回环代理（受信任）：CF-Connecting-IP 为空时回退到 X-Forwarded-For 首段
   const loopbackWithXff = {
     socket: { remoteAddress: "::ffff:127.0.0.1" },

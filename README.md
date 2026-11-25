@@ -28,7 +28,7 @@ Rigorously reverse-engineered and aligned 1:1 with the official CLI source code 
 
 - **3-in-1 Protocol Compatibility**:
   - OpenAI `/v1/chat/completions` (Streaming SSE / Non-streaming, Function Calling, Multimodal Vision, Reasoning Effort `reasoning_content`)
-  - Anthropic `/v1/messages` (Native support for Claude Code, integrated `web_search_20250305` server tool execution)
+  - Anthropic `/v1/messages` (Native support for Claude Code, integrated `web_search_20250305` and `web_fetch_20250910` server tool execution)
   - OpenAI Responses API (`/v1/responses`, built-in `: keepalive` SSE comments to prevent client timeout)
 - **Zero Runtime Dependencies**: Built purely on Node.js standard libraries (`node:http`, `node:crypto`, `node:fs`). Extremely lightweight, sub-second cold starts, tested by 350+ test suites.
 - **📊 Quota-Aware Multi-Account Scheduling (v2)**:
@@ -163,7 +163,7 @@ Detailed operational guides, configuration parameters, and internal architecture
 |---|---|
 | 🚀 **[Deployment Guide](docs/deployment.md)** | Docker, Compose, GHCR images, Systemd service, production Nginx reverse proxy configuration, Keep-Alive timing, and memory tuning |
 | ⚙️ **[Configuration Reference](docs/configuration.md)** | Complete `config.json` reference, `.env` file guide, environment variables reference, outbound proxy syntax, and key binding |
-| 🔌 **[API Reference](docs/api.md)** | Chat Completions, Messages, Responses API specifications, Anthropic Web Search server tool execution, and error code mappings |
+| 🔌 **[API Reference](docs/api.md)** | Chat Completions, Messages, Responses API specifications, Anthropic Web Search / Web Fetch server tool execution, and error code mappings |
 | 📊 **[Quota & Scheduling](docs/quota.md)** | Official quota scraping mechanics, account state machine, pool rotation, and automated failover |
 | 🛡️ **[Architecture & Anti-Detection](docs/architecture.md)** | Hardware fingerprint derivation, 9-key wire protocol envelopes, pre-first-byte retry, adaptive token learning, and stream backpressure |
 | 🛠️ **[Admin API Contract](docs/admin-api.md)** | RESTful API specifications between backend and web dashboard |
@@ -181,7 +181,8 @@ comm2api/
 │   ├── auth.mjs              # 2API Key & downstream authentication
 │   ├── outbound-proxy.mjs    # Outbound proxy pool & CONNECT tunneling
 │   ├── quota-poller.mjs      # Quota scraping & scheduling state machine
-│   └── web-search.mjs        # Anthropic server tool web search executor
+│   ├── web-search.mjs        # Anthropic server tool web search executor
+│   └── web-fetch.mjs         # Anthropic server tool web fetch executor (SSRF-guarded)
 ├── web/                      # Admin dashboard source (Vue 3 + Tailwind CSS)
 ├── docs/                     # Modular documentation center
 │   ├── deployment.md         # Deployment guide

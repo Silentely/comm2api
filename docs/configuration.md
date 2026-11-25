@@ -47,6 +47,7 @@
 | `apiKey` | `""` | 字符串/数组 | 上游 CC API Key（`user_` 开头）。推荐改在后台 `/admin/` 动态添加；此处填写的 Key 会作为**只读**条目出现在后台 |
 | `strategy` | `round_robin` | 字符串 | Key 轮询策略：`round_robin`（轮询）/ `random`（避让连续重复）/ `fill`（压满首个可用）/ `quota_aware`（按官方额度排序）/ `quota_sticky`（额度排序 + 会话粘性）。后两种见 [quota.md](quota.md) |
 | `defaultModel` | `""` | 字符串 | 默认模型（Key 测试与模型测试使用）；空则默认取目录第一项 |
+| `visionFallbackModel` | `""` | 字符串 | 纯文本模型的识图降级辅助模型（如 `gpt-5.6-luna`）。配置后，发往不支持图片输入的模型时，图片会先由该模型转写为文本描述；空表示关闭 |
 | `logFile` | `""` | 字符串 | 日志文件路径（留空则只输出到控制台 stdout） |
 | `logLevel` | `info` | 字符串 | 日志级别：`debug` / `info` / `warn` / `error` |
 | `useProviderModels` | `true` | 布尔 | 是否从 Provider API 动态拉取上游最新模型列表 |
@@ -58,7 +59,7 @@
 | `fingerprintSalt` | `""` | 字符串 | 设备指纹生成盐。需要成批更换伪装硬件身份时修改它 |
 | `deviceProjectDir` | `""` | 字符串 | 伪装的项目绝对路径（留空使用内置 `C:\Users\dev\projects\app`） |
 | `emptySystemPlaceholder` | `true` | 布尔 | 当客户端未传 system prompt 时自动发单空格占位，防止上游强行注入约 7.5K token 默认提示词 |
-| `webSearch` | `false` | 布尔 | 是否代为执行 Anthropic 服务端搜索工具 `web_search_20250305` |
+| `webSearch` | `false` | 布尔 | 是否代为执行 Anthropic 服务端工具 `web_search_20250305` 与 `web_fetch_20250910` |
 | `proxies` | `[]` | 数组 | 出站代理池列表，见下文专门章节 |
 | `proxyFile` | `""` | 字符串 | 每行一条出站代理的文件路径（相对路径按 `config.json` 目录解析） |
 | `upstreamProxy` | `""` | 字符串 | 单出站代理兼容字段（旧版配置平滑兼容） |
@@ -110,6 +111,7 @@ CC_DATA_DIR=./data
 | `HOST` | `0.0.0.0` | `host` | 服务监听网卡 IP |
 | `ADMIN_PASSWORD` | 空 | - | **管理后台密码**。未设置时 `/admin/` 整体拒绝访问 |
 | `ADMIN_COOKIE_SECURE` | 空 | - | 设置为 `1` 时给 Cookie 加 `Secure` 标记（**仅套了 HTTPS 时开启**） |
+| `CC_TRUST_PROXY` / `TRUST_PROXY` | 关 | - | 设为 `1` 时信任 `CF-Connecting-IP` / `X-Forwarded-For`（仅取合法 IP）。直连来源为回环地址时自动信任；其余直连一律使用 socket 地址，防止伪造头部绕过登录限速 |
 | `PROXY_KEY` | 空 | `proxyKey` | 数据面访问口令，非空时强制启用严格鉴权 |
 | `CC_API_KEY` | 空 | `apiKey` | 上游 Key（多个逗号分隔，以只读模式载入池中） |
 | `CC_DATA_DIR` | `./data` | - | 运行时数据目录（存储 UI Key、测试缓存、额度快照） |
@@ -122,7 +124,7 @@ CC_DATA_DIR=./data
 | `CC_PROXIES` | 空 | `proxies` | 出站代理列表，逗号分隔（支持 `pool+` / `#pool`） |
 | `CC_PROXY_FILE` | 空 | `proxyFile` | 出站代理清单文件路径 |
 | `CC_UPSTREAM_PROXY` | 空 | `upstreamProxy` | 单出站代理地址 |
-| `CC_PROXY_HEALTH_INTERVAL_MS`| `900000` (15m) | - | 定时复查不健康代理的周期 |
+| `CC_PROXY_HEALTH_INTERVAL_MS`| `300000` (5m) | - | 定时复查不健康代理的周期 |
 | `CC_PROXY_HEALTH_TIMEOUT_MS` | `10000` (10s) | - | 代理健康检查超时时间 |
 | `CC_PROXY_PROBE_TIMEOUT_MS`  | `10000` (10s) | - | 后台手动探测代理的超时时间 |
 
@@ -150,8 +152,10 @@ CC_DATA_DIR=./data
 | `CC_MAX_TOOL_IMAGE_MB` | `6` | 单请求内工具截图 Base64 总预算（MB），超限转占位符 |
 | `CC_CLIENT_DRAIN_TIMEOUT_MS`| 空 | 客户端背压持续阻塞超时断开毫秒数（防僵尸连接） |
 | `CC_KEEPALIVE_TIMEOUT_MS` | `65000` (65s) | HTTP Keep-Alive 空闲保持时长（反代必须小于此值） |
-| `CC_WEB_SEARCH` | 关 | 设为 `1` 开启代执行 Anthropic Web Search 工具 |
+| `CC_WEB_SEARCH` | 关 | 设为 `1` 开启代执行 Anthropic 服务端工具（`web_search` 与 `web_fetch`） |
 | `CC_WEB_SEARCH_TIMEOUT_MS` | `8000` (8s) | 搜索子请求单次超时时间 |
+| `CC_WEB_FETCH_TIMEOUT_MS` | `15000` (15s) | 抓取子请求单次超时时间，最终钳制在 1–60 秒 |
+| `CC_VISION_FALLBACK_MODEL` / `VISION_FALLBACK_MODEL` | 空 | 识图降级辅助模型名；空表示关闭 |
 
 ---
 

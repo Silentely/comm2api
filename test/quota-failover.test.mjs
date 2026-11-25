@@ -373,6 +373,41 @@ test('严格绑定代理不可用：返回 503（不是 429，也不是额度耗
   }
 });
 
+test('严格绑定代理不可用：仍要跨账号故障转移到 B，不能直接拒绝整个请求', async () => {
+  const ctl = {
+    windows: { [KEY_A]: { used: 1, cap: 100 }, [KEY_B]: { used: 1, cap: 100 } },
+    generate: {},
+  };
+  const mock = await startQuotaUpstream(ctl);
+  const workdir = workdirWith({
+    apiKey: [KEY_A, KEY_B],
+    // fill 让首个候选固定为 A，确保走的是「A 的严格代理不可用 → 换账号」这条路径
+    strategy: 'fill',
+  });
+  const pid = sha('http://127.0.0.1:1');
+  mkdirSync(join(workdir, 'data'), { recursive: true });
+  writeFileSync(join(workdir, 'data', 'proxies.json'), JSON.stringify({
+    version: 1,
+    entries: [{ id: pid, value: 'http://127.0.0.1:1', enabled: false }],
+    disabled: [],
+    bindings: { [sha(KEY_A)]: { mode: 'strict_bind', proxyId: pid } },
+  }, null, 2) + '\n');
+
+  const proxy = await startProxy({ upstreamPort: mock.port, cwd: workdir });
+  try {
+    const r = await proxy.post('/v1/chat/completions', CHAT_BODY(), AUTH);
+    assert.equal(r.status, 200, 'B 必须接手这次请求');
+    assert.ok((await r.text()).includes('hello'));
+
+    const gens = mock.generates();
+    assert.equal(gens.length, 1, '只允许 B 发起一次上游请求');
+    assert.equal(gens[0].key, KEY_B, 'A 的严格绑定不可用，绝不能用 A 或绕过代理发出去');
+  } finally {
+    await proxy.kill();
+    await mock.close();
+  }
+});
+
 test('上游明确 USAGE_EXCEEDED：未输出任何内容时安全切到 B，后续请求也不再回 A', async () => {
   const ctl = {
     // 官方额度接口显示两个账号都还有额度（模拟「官方还没更新」）

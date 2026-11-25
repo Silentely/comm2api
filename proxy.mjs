@@ -34,7 +34,7 @@ import { createSessionAffinity, resolveSessionId } from './lib/session-affinity.
 import { createAlerter } from './lib/alerts.mjs';
 import { createUsageAnalytics } from './lib/usage-analytics.mjs';
 import {
-  guardFetchUrl, executeWebFetch, formatFetchOutput, decodeWebFetchResultBlocks,
+  executeWebFetch, decodeWebFetchResultBlocks,
   WEB_FETCH_ROUTE, WEB_FETCH_SCHEMA, DEFAULT_WEB_FETCH_MAX_USES,
 } from './lib/web-fetch.mjs';
 
@@ -3772,21 +3772,18 @@ async function readStreamText(stream, signal) {
   return text;
 }
 
-async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, index, allowDirect = false }) {
-  let boundAddress = proxyAddress;
-  if (boundAddress === undefined && route) {
-    if (route.available === false) {
-      const err = new Error(route.reason || 'Bound proxy route is unavailable');
-      err.code = 'PROXY_ROUTE_UNAVAILABLE';
-      throw err;
-    }
-    boundAddress = route.address;
-  }
-  if (boundAddress === undefined && !allowDirect) {
+async function transcribeImage({ imageUrl, apiKey, route, signal }) {
+  if (!route) {
     const err = new Error('Missing bound proxy route for vision fallback');
     err.code = 'PROXY_ROUTE_UNAVAILABLE';
     throw err;
   }
+  if (route.available === false) {
+    const err = new Error(route.reason || 'Bound proxy route is unavailable');
+    err.code = 'PROXY_ROUTE_UNAVAILABLE';
+    throw err;
+  }
+  const boundAddress = route.address;
   const timeoutSignal = AbortSignal.timeout(10000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
@@ -3814,7 +3811,6 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, 
     };
 
     const helperCcBody = buildCcRequest(helperReq);
-    helperCcBody._isVisionHelper = true;
 
     const response = await forwardToCC(
       helperCcBody,
@@ -3822,7 +3818,7 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, 
       { 'x-vision-helper': 'true' },
       combinedSignal,
       undefined,
-      proxyAddress
+      boundAddress
     );
 
     if (!response.ok) {
@@ -3844,7 +3840,7 @@ async function transcribeImage({ imageUrl, apiKey, proxyAddress, route, signal, 
   }
 }
 
-async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, route, signal, allowDirect = false }) {
+async function applyVisionFallback(openaiReq, { apiKey, route, signal }) {
   if (!openaiReq || !Array.isArray(openaiReq.messages)) return;
 
   const imageEntries = [];
@@ -3869,6 +3865,19 @@ async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, route, sig
 
   if (imageEntries.length === 0) return;
 
+  // 每张图都是一次独立的上游 LLM 调用：限制单请求转写数量，避免一个大请求放大成任意次计费调用。
+  const MAX_VISION_IMAGES = 20;
+  if (imageEntries.length > MAX_VISION_IMAGES) {
+    for (let i = MAX_VISION_IMAGES; i < imageEntries.length; i++) {
+      const { mIdx, pIdx } = imageEntries[i];
+      openaiReq.messages[mIdx].content[pIdx] = {
+        type: 'text',
+        text: '[Image skipped: per-request vision transcription limit reached]',
+      };
+    }
+    imageEntries.length = MAX_VISION_IMAGES;
+  }
+
   log('info', 'Executing vision fallback for images', {
     count: imageEntries.length,
     model: CFG.visionFallbackModel,
@@ -3886,11 +3895,8 @@ async function applyVisionFallback(openaiReq, { apiKey, proxyAddress, route, sig
       results[currentIdx] = await transcribeImage({
         imageUrl: entry.imageUrl,
         apiKey,
-        proxyAddress,
         route,
         signal,
-        index: entry.index,
-        allowDirect,
       });
     }
   };
@@ -3976,20 +3982,9 @@ async function handleChatCompletions(req, res) {
   }
   apiKey = account.key;
 
-  let initialRoute = null;
-  try {
-    initialRoute = proxyPool.routeFor(apiKey);
-  } catch (err) {
-    if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
-      sendAuthError(res, err.message, false, 'proxy_unavailable');
-      return;
-    }
-  }
-  if (!initialRoute || !initialRoute.available) {
-    sendAuthError(res, initialRoute?.reason || 'Strict bound proxy unavailable', false, 'proxy_unavailable');
-    return;
-  }
-  const proxyAddress = initialRoute.address;
+  // routeFor 只返回结构化结果、不会抛错。严格绑定不可用时不在入口直接拒绝：
+  // forwardWithKeyRetry 会跳过该账号尝试其它账号，全部不可用才返回 503。
+  const initialRoute = proxyPool.routeFor(apiKey);
 
   // AbortController 用于客户端断连时真正打断 CC 上游（pi-commandcode-provider 模式）
   // 每次尝试都换一个新的（已 abort 的 signal 不可复用）
@@ -4063,7 +4058,6 @@ async function handleChatCompletions(req, res) {
     try {
       await applyVisionFallback(openaiReq, {
         apiKey,
-        proxyAddress: initialRoute.address,
         route: initialRoute,
         signal: abortController.signal,
       });
@@ -5094,7 +5088,6 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
                 upstreamToolCallId: event.toolCallId || srvId, // 追加历史时对齐上游生成的 id
               };
               (ctx.pendingServerTools ||= []).push(pendingItem);
-              (ctx.pendingSearches ||= []).push(pendingItem);
               break;
             }
 
@@ -5178,7 +5171,7 @@ async function* createAnthropicSseTranslator(response, model, messageId, ctx) {
 
       // 搜索循环：本轮有待执行的服务端工具调用 → 不发 message_delta / message_stop，
       // 把本轮 usage 累进 ctx.usageCarry，由 handleMessages 执行搜索后开下一轮续写。
-      if ((ctx.pendingServerTools && ctx.pendingServerTools.length) || (ctx.pendingSearches && ctx.pendingSearches.length)) {
+      if (ctx.pendingServerTools && ctx.pendingServerTools.length) {
         const c = (ctx.usageCarry ||= { input: 0, output: 0, cached: 0, cacheWrite: 0 });
         c.input += noCacheTokens >= 0 ? noCacheTokens : Math.max(0, inputTokens - cachedInputTokens - (cacheWriteTokens || 0));
         c.output += outputTokens;
@@ -5283,9 +5276,6 @@ async function handleMessages(req, res) {
   let openaiReq = convertAnthropicToOpenAI(anthropicReq);
   // 同 chat：buildCcRequest 读的是这个对象的 model，兜底结果必须写回去才生效
   openaiReq.model = model;
-  if (anthropicReq._isVisionHelper) {
-    openaiReq._isVisionHelper = true;
-  }
   if (!stream && openaiReq._serverTools) {
     // 搜索循环只实现了流式（Claude Code 只走流式）；非流式退回剥掉服务端工具
     const names = new Set(Object.keys(openaiReq._serverTools));
@@ -5302,20 +5292,8 @@ async function handleMessages(req, res) {
   }
   apiKey = account.key;
 
-  let initialRoute = null;
-  try {
-    initialRoute = proxyPool.routeFor(apiKey);
-  } catch (err) {
-    if (err.code === 'PROXY_ROUTE_UNAVAILABLE') {
-      sendAuthError(res, err.message, true, 'proxy_unavailable');
-      return;
-    }
-  }
-  if (!initialRoute || !initialRoute.available) {
-    sendAuthError(res, initialRoute?.reason || 'Strict bound proxy unavailable', true, 'proxy_unavailable');
-    return;
-  }
-  const proxyAddress = initialRoute.address;
+  // 严格绑定不可用不在入口拒绝（理由见 handleChatCompletions 的同名注释）
+  const initialRoute = proxyPool.routeFor(apiKey);
 
   const abortController = new AbortController();
   let aborted = false;
@@ -5358,7 +5336,6 @@ async function handleMessages(req, res) {
     try {
       await applyVisionFallback(openaiReq, {
         apiKey,
-        proxyAddress: initialRoute.address,
         route: initialRoute,
         signal: abortController.signal,
       });
@@ -5442,7 +5419,7 @@ async function handleMessages(req, res) {
           bytesReceived: 0, lastCcEvent: '', inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, upstreamError: null,
           // 服务端工具状态：serverTools 来自 convertAnthropicToOpenAI；pendingServerTools 由翻译器登记
           serverTools: openaiReq._serverTools || null,
-          pendingServerTools: null, pendingSearches: null, usageCarry: null,
+          pendingServerTools: null, usageCarry: null,
           searchCount: 0, fetchCount: 0, totalServerToolCalls: 0, nextBlockIndex: 0,
           suppressMessageStart: false, thinkingAll: '', roundText: '',
         };
@@ -5482,7 +5459,6 @@ async function handleMessages(req, res) {
         };
         for (let round = 0; ; round++) {
           ctx.pendingServerTools = null;
-          ctx.pendingSearches = null;
           ctx.roundText = '';
           ctx.thinkingAll = '';
           ctx.suppressMessageStart = round > 0;
@@ -5494,7 +5470,7 @@ async function handleMessages(req, res) {
             }
             await emit(event);
           }
-          const pending = ctx.pendingServerTools || ctx.pendingSearches;
+          const pending = ctx.pendingServerTools;
           if (aborted || !pending || !pending.length) break;
 
           if (round >= 10 || round > maxSearchRounds) {
@@ -5665,8 +5641,14 @@ async function handleMessages(req, res) {
           log('error', 'Proxy route unavailable for helper request', { reason: e.message });
           if (!started) {
             sendAnthropicError(res, 503, 'api_error', e.message || 'Bound proxy route is unavailable');
+            return;
           }
-          return;
+          // 已经开流：补一个终结性的 error 事件，不能让客户端对着半截流等到超时
+          if (!res.writableEnded) {
+            try {
+              res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: e.message || 'Bound proxy route is unavailable' } })}\n\n`);
+            } catch {}
+          }
         } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
           log('warn', 'Stream idle timeout', {
             path: '/v1/messages',
