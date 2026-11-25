@@ -66,11 +66,11 @@ async function refreshQuota(keyId) {
   }
 }
 
-// 按额度感知的排序分展示：五小时剩余 → 周剩余 → 月剩余。
+// 按额度感知的排序分展示：月度重置时间 → 周剩余 → 五小时剩余。
 // 实际派发还会参考在途请求、燃烧预测与会话粘性，这里只给管理员一个直观顺序。
 const rankedAccounts = computed(() => {
   const list = quota.value?.accounts || []
-  return [...list].sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER))
+  return [...list].sort((a, b) => (a.quotaRank ?? a.rank ?? Number.MAX_SAFE_INTEGER) - (b.quotaRank ?? b.rank ?? Number.MAX_SAFE_INTEGER))
 })
 
 // 优先级只对当前可派发的账号编号；被硬封锁的账号不占号。
@@ -85,7 +85,7 @@ const priorityIndex = computed(() => {
 
 function rankTitle(acc) {
   const pct = Math.round((acc.remainingScore ?? 0) * 100)
-  return `额度感知排序：五小时剩余 → 周剩余 → 月剩余；剩余加权分 ${pct}%；同档内还会参考在途请求与会话粘性`
+  return `额度感知排序：月度重置时间 → 周剩余 → 五小时剩余；排序加权分 ${pct}%；实际派发还会参考在途请求、预测与会话粘性`
 }
 
 function qWindow(acc, name) {
@@ -426,7 +426,7 @@ onMounted(() => {
               · 可用 <strong>{{ quota.summary.usable }}</strong> / {{ quota.summary.total }}
               · 耗尽 {{ quota.summary.exhausted }}
             </template>
-            <template v-if="quota.quotaRouting"> · 下列顺序按额度剩余排序（实际派发还会参考会话粘性与在途请求）</template>
+            <template v-if="quota.quotaRouting"> · 下列顺序按月度重置 → 周 → 五小时排序（实际派发还会参考会话粘性与在途请求）</template>
           </div>
 
           <div v-for="acc in rankedAccounts" :key="acc.keyId" class="result-box" style="margin-bottom: 12px">

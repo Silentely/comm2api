@@ -487,7 +487,7 @@ onUnmounted(() => {
         </div>
         <div class="hint">
           <strong>轮询</strong>按顺序依次使用；<strong>随机</strong>随机挑选；<strong>填满</strong>优先压满同一个 Key 再切换；
-          <strong>额度感知</strong>按官方剩余额度（五小时 → 周 → 月）优先派发；
+          <strong>额度感知</strong>按官方额度窗口优先级（月度重置 → 周 → 五小时）派发；
           <strong>额度感知 + 会话粘性</strong>在此基础上尽量让同一会话命中同一账号以提升缓存命中率。
         </div>
       </div>
